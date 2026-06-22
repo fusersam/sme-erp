@@ -206,7 +206,13 @@ var App = (function() {
 
   function _callModule(mod, action, data, cb, errCb) {
     google.script.run
-      .withSuccessHandler(cb)
+      .withSuccessHandler(function(result) {
+        console.groupCollapsed('moduleAction success: ' + mod + '/' + action);
+        console.log('request payload:', data || {});
+        console.log('response result:', result);
+        console.groupEnd();
+        cb(result);
+      })
       .withFailureHandler(function(e) { if(errCb) errCb(e); else showToast(e.message,'danger'); })
       .moduleAction(mod, action, data||{});
   }

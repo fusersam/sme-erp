@@ -10,7 +10,8 @@ var APP_CONFIG = {
   VERSION: '1.5.3-deploycheck',
   
   // Set this to your Google Sheets spreadsheet ID after creation
-  // Leave empty to auto-create on first run
+  // Leave empty for container-bound deployments so the active spreadsheet
+  // is used automatically.
   SPREADSHEET_ID: '',
   
   // Default currency
@@ -90,6 +91,11 @@ var ConfigService = (function() {
     try {
       var active = SpreadsheetApp.getActiveSpreadsheet();
       if (active) {
+        var savedId = _getSavedSpreadsheetId();
+        if (!APP_CONFIG.SPREADSHEET_ID && savedId && savedId !== active.getId()) {
+          PropertiesService.getScriptProperties().deleteProperty('DB_SPREADSHEET_ID');
+          Logger.log('ConfigService: cleared stale DB_SPREADSHEET_ID because active container-bound spreadsheet is present.');
+        }
         _resolvedSs = active;
         return active;
       }

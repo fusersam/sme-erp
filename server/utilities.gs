@@ -105,6 +105,7 @@ var Utils = (function() {
   function sheetToObjects(sheetName, options) {
     options = options || {};
     var sheet = ConfigService.getSheet(sheetName);
+    var headers = getHeaders(sheetName);
     var data = sheet.getDataRange().getValues();
 
     // Empty sheet (no rows) or headers-only (1 row): return the SAME object
@@ -115,7 +116,6 @@ var Utils = (function() {
       return { data: [], total: 0, offset: options.offset || 0, limit: options.limit || 0 };
     }
     
-    var headers = data[0].map(function(h) { return h.toString().trim(); });
     var results = [];
     
     for (var i = 1; i < data.length; i++) {
@@ -126,7 +126,14 @@ var Utils = (function() {
       var obj = { _rowIndex: i + 1 }; // 1-based row for updates
       for (var j = 0; j < headers.length; j++) {
         if (headers[j]) {
-          obj[headers[j]] = row[j];
+          var cellValue = row[j];
+          if (cellValue instanceof Date) {
+            // Guard: an Invalid Date (from a malformed cell) makes toISOString
+            // throw RangeError, which would break the whole read. Fall back to
+            // '' so one bad date cell can never blank an entire sheet.
+            cellValue = isNaN(cellValue.getTime()) ? '' : cellValue.toISOString();
+          }
+          obj[headers[j]] = cellValue;
         }
       }
       
@@ -205,8 +212,29 @@ var Utils = (function() {
         'Run "Initialize Database" from the menu to repair sheet headers.');
     }
 
-    var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0]
+    var firstRow = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0]
       .map(function(h) { return h.toString().trim(); });
+
+    if (typeof DatabaseInit !== 'undefined' && DatabaseInit.getSchema) {
+      var schema = DatabaseInit.getSchema();
+      var expected = schema && schema[sheetName];
+      if (expected && expected.length) {
+        var matchCount = 0;
+        for (var i = 0; i < firstRow.length; i++) {
+          if (expected.indexOf(firstRow[i]) !== -1) matchCount++;
+        }
+        if (matchCount < Math.ceil(expected.length / 2)) {
+          sheet.insertRowBefore(1);
+          sheet.getRange(1, 1, 1, expected.length).setValues([expected]);
+          sheet.setFrozenRows(1);
+          Logger.log('getHeaders: repaired missing header row on "' + sheetName + '"');
+          _headerCache[sheetName] = expected;
+          return expected;
+        }
+      }
+    }
+
+    var headers = firstRow;
     _headerCache[sheetName] = headers;
     return headers;
   }

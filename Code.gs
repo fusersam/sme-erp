@@ -487,7 +487,28 @@ function moduleAction(module, action, data) {
   }
   
   AuditService.log(module, action, data);
-  return routers[module]();
+  var result = routers[module]();
+  var safeResult = result;
+  try {
+    safeResult = JSON.parse(JSON.stringify(result));
+  } catch (e) {
+    Logger.log('moduleAction JSON serialization failed: ' + e.message);
+    safeResult = result;
+  }
+  try {
+    var summary = 'moduleAction response for ' + module + '/' + action + ' -> ';
+    if (safeResult && safeResult.data && Array.isArray(safeResult.data)) {
+      summary += 'data.length=' + safeResult.data.length;
+    } else if (safeResult && typeof safeResult === 'object') {
+      summary += 'keys=' + Object.keys(safeResult).join(',');
+    } else {
+      summary += String(safeResult);
+    }
+    Logger.log(summary);
+  } catch (logErr) {
+    Logger.log('moduleAction response logging failed: ' + logErr.message);
+  }
+  return safeResult;
 }
 
 /**
