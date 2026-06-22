@@ -1,0 +1,2652 @@
+<script>
+/**
+ * SME Business Manager - Client Application
+ * ============================================
+ * Single-page application controller.
+ * Phase 2: Full sales module (Customers, Quotations, Invoices, Receipts, Accounting).
+ */
+
+var App = (function() {
+
+  // Client build tag — baked into THIS app.html bundle. Compared against the
+  // server's reported version in Database Info. If they differ, the browser is
+  // running a stale cached/old-deployment copy of this file even though the
+  // server code is newer (the classic "edited the file but the live URL serves
+  // an old deployment version" trap). Bump this whenever app.html changes and
+  // it becomes a reliable deployment tracer.
+  var BUILD_TAG = '1.5.3-deploycheck';
+
+  // ── State ──
+  var _user = null;
+  var _config = {};
+  var _currentModule = 'dashboard';
+  var _dashboardData = null;
+  var _charts = {};
+  var _journalAccounts = [];
+  var _payrollStructures = [];
+
+  var MODULE_TITLES = {
+    dashboard: 'Dashboard', accounting: 'Accounting', customers: 'Customers',
+    quotations: 'Quotations', invoices: 'Invoices', receipts: 'Receipts',
+    sales: 'Sales & Invoices', purchasing: 'Purchasing', expenses: 'Expenses',
+    cashbank: 'Cash & Bank', payroll: 'Payroll', assets: 'Fixed Assets',
+    inventory: 'Inventory', products: 'Products', categories: 'Categories',
+    'inv-txns': 'Stock Transactions', 'inv-lowstock': 'Low Stock Report',
+    'inv-valuation': 'Inventory Valuation', suppliers: 'Suppliers',
+    employees: 'Employees', 'salary-structures': 'Salary Structures',
+    'payroll-runs': 'Payroll Runs',
+    reports: 'Reports', analytics: 'Analytics & Ratios',
+    settings: 'Settings', users: 'User Management'
+  };
+
+  // ============================================================
+  // INIT
+  // ============================================================
+  /**
+   * Initialize the app.
+   *
+   * Can be called two ways:
+   *  1. init(userData, configData) — server-injected objects (preferred, fast)
+   *  2. init()                     — no args; fetches user+config via
+   *                                  google.script.run (resilient fallback used
+   *                                  when template injection is unavailable or
+   *                                  failed to parse)
+   */
+  function init(userData, configData) {
+    try {
+      if (userData) {
+        _applyUser(userData);
+        _config = configData || {};
+        navigate('dashboard');
+      } else {
+        // Fallback: fetch from server
+        _bootstrapFromServer();
+      }
+    } catch (e) {
+      // Last-resort fallback if anything above throws
+      _bootstrapFromServer();
+    }
+  }
+
+  /**
+   * Fetch user and config from the server, then render.
+   * Used when init() is called without injected data.
+   */
+  function _bootstrapFromServer() {
+    google.script.run
+      .withSuccessHandler(function(user) {
+        if (!user) {
+          // Not logged in — send back to login
+          window.top.location.reload();
+          return;
+        }
+        _applyUser(user);
+        google.script.run
+          .withSuccessHandler(function(cfg) {
+            _config = cfg || {};
+            navigate('dashboard');
+          })
+          .withFailureHandler(function() {
+            _config = {};
+            navigate('dashboard');
+          })
+          .getClientConfigData();
+      })
+      .withFailureHandler(function(e) {
+        var c = document.getElementById('pageContent');
+        if (c) c.innerHTML = '<div class="alert alert-danger m-3">Failed to load user session: ' +
+          (e && e.message ? e.message : 'unknown error') + '<br><button class="btn btn-sm btn-primary mt-2" onclick="window.top.location.reload()">Retry</button></div>';
+      })
+      .getUserInfo();
+  }
+
+  /**
+   * Apply the user object to state and the header UI.
+   */
+  function _applyUser(user) {
+    _user = user;
+    var avatarEl = document.getElementById('userAvatar');
+    var nameEl   = document.getElementById('userName');
+    var roleEl   = document.getElementById('userRole');
+    if (_user) {
+      var initials = _user.name
+        ? _user.name.split(' ').map(function(n){ return n[0]; }).join('').toUpperCase().substring(0,2)
+        : (_user.email ? _user.email[0].toUpperCase() : 'U');
+      if (avatarEl) avatarEl.textContent = initials;
+      if (nameEl)   nameEl.textContent   = _user.name || _user.email || 'User';
+      if (roleEl)   roleEl.textContent   = _user.role || '';
+    }
+  }
+
+  // ============================================================
+  // NAVIGATION
+  // ============================================================
+  function navigate(module, params) {
+    _currentModule = module;
+    document.querySelectorAll('.nav-item').forEach(function(el) {
+      el.classList.remove('active');
+      var dm = el.getAttribute('data-module');
+      var invPages = ['products','categories','inv-txns','inv-lowstock','inv-valuation','suppliers'];
+      var payrollPages = ['employees','salary-structures','payroll-runs'];
+      if (dm === module || (dm === 'sales' && ['customers','quotations','invoices','receipts'].indexOf(module) !== -1) || (dm === 'inventory' && invPages.indexOf(module) !== -1) || (dm === 'payroll' && payrollPages.indexOf(module) !== -1)) {
+        el.classList.add('active');
+      }
+    });
+    document.getElementById('pageTitle').textContent = MODULE_TITLES[module] || module;
+    document.getElementById('sidebar').classList.remove('open');
+    document.getElementById('sidebarOverlay').classList.remove('active');
+
+    var c = document.getElementById('pageContent');
+    switch (module) {
+      case 'dashboard':   _renderDashboard(c); break;
+      case 'customers':   _renderCustomers(c, params); break;
+      case 'quotations':  _renderQuotations(c, params); break;
+      case 'invoices':    _renderInvoices(c, params); break;
+      case 'receipts':    _renderReceipts(c, params); break;
+      case 'accounting':    _renderAccounting(c); break;
+      case 'sales':         _renderSalesHub(c); break;
+      case 'inventory':     _renderInventoryHub(c); break;
+      case 'products':      _renderProducts(c, params); break;
+      case 'categories':    _renderCategories(c); break;
+      case 'inv-txns':      _renderInventoryTxns(c, params); break;
+      case 'inv-lowstock':  _renderLowStock(c); break;
+      case 'inv-valuation': _renderValuation(c); break;
+      case 'suppliers':     _renderSuppliers(c, params); break;
+      case 'payroll':       _renderPayrollHub(c); break;
+      case 'employees':     _renderEmployees(c, params); break;
+      case 'salary-structures': _renderSalaryStructures(c); break;
+      case 'payroll-runs':  _renderPayrollRuns(c, params); break;
+      case 'reports':       _renderReports(c, params); break;
+      case 'analytics':     _renderAnalytics(c); break;
+      case 'settings':      _renderSettings(c); break;
+      case 'users':         _renderUsers(c); break;
+      default:              _renderPlaceholder(c, module); break;
+    }
+  }
+
+  function toggleSidebar() {
+    document.getElementById('sidebar').classList.toggle('open');
+    document.getElementById('sidebarOverlay').classList.toggle('active');
+  }
+
+  // ============================================================
+  // HELPERS
+  // ============================================================
+  function _fmtMoney(a, s) { s=s||_config.currencySymbol||'GH₵'; var n=parseFloat(a)||0; return s+n.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g,','); }
+  function _fmtDate(d) { if(!d)return'-'; var dt=new Date(d); if(isNaN(dt))return'-'; return dt.toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'}); }
+  function _esc(s) { if(!s)return''; var d=document.createElement('div'); d.appendChild(document.createTextNode(s)); return d.innerHTML; }
+
+  /**
+   * Safely unwrap the .data array from a google.script.run result.
+   * google.script.run delivers `null` to the success handler if the called
+   * Apps Script function ever returns undefined (or the call otherwise fails
+   * to deliver a payload) — reading .data off that null was a real crash
+   * ("Cannot read properties of null (reading 'data')") that froze whatever
+   * list was being rendered. Use this anywhere a list result is unwrapped.
+   * @param {*} result
+   * @returns {Array}
+   */
+  function _data(result) { return (result && result.data) || []; }
+  function _escAttr(s) { return _esc(s).replace(/"/g,'&quot;'); }
+  function _loading(c) { c.innerHTML='<div class="module-loading"><div class="spinner-border text-primary"></div></div>'; }
+  function _badge(s) { return '<span class="badge-status '+(s||'').toLowerCase()+'">'+_esc(s)+'</span>'; }
+
+  function showLoading(s) { document.getElementById('loadingOverlay').style.display=s?'flex':'none'; }
+
+  function showToast(message, type) {
+    type=type||'info'; var icons={success:'check-circle',danger:'x-circle',warning:'exclamation-circle',info:'info-circle'};
+    var id='t_'+Date.now();
+    document.getElementById('toastContainer').insertAdjacentHTML('beforeend',
+      '<div id="'+id+'" class="toast align-items-center text-bg-'+type+' border-0" role="alert"><div class="d-flex">' +
+      '<div class="toast-body"><i class="bi bi-'+(icons[type]||'info-circle')+' me-2"></i>'+_esc(message)+'</div>' +
+      '<button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button></div></div>');
+    var el=document.getElementById(id); var t=new bootstrap.Toast(el,{autohide:true,delay:5000}); t.show();
+    el.addEventListener('hidden.bs.toast',function(){el.remove();});
+  }
+
+  function _callModule(mod, action, data, cb, errCb) {
+    google.script.run
+      .withSuccessHandler(cb)
+      .withFailureHandler(function(e) { if(errCb) errCb(e); else showToast(e.message,'danger'); })
+      .moduleAction(mod, action, data||{});
+  }
+
+  // ============================================================
+  // SALES HUB (sub-nav)
+  // ============================================================
+  function _renderSalesHub(c) {
+    c.innerHTML =
+      '<div class="row g-3">' +
+      [
+        {m:'customers',i:'people',t:'Customers',d:'Manage customer records and statements'},
+        {m:'quotations',i:'file-earmark-text',t:'Quotations',d:'Create and manage sales quotes'},
+        {m:'invoices',i:'receipt-cutoff',t:'Invoices',d:'Generate and track invoices'},
+        {m:'receipts',i:'cash-coin',t:'Receipts',d:'Record customer payments'}
+      ].map(function(x){
+        return '<div class="col-sm-6 col-lg-3"><div class="card" style="cursor:pointer;" onclick="App.navigate(\''+x.m+'\')">' +
+          '<div class="card-body text-center py-4"><i class="bi bi-'+x.i+'" style="font-size:2.5rem;color:var(--brand-primary);"></i>' +
+          '<h5 class="mt-3">'+x.t+'</h5><p class="text-muted small mb-0">'+x.d+'</p></div></div></div>';
+      }).join('') + '</div>';
+  }
+
+  // ============================================================
+  // CUSTOMERS
+  // ============================================================
+  function _renderCustomers(c, params) {
+    if (params && params.view) { _renderCustomerDetail(c, params.view); return; }
+    _loading(c);
+    _callModule('customers','list',{sort:'name',order:'asc'},function(result) {
+      var rows = _data(result);
+      var html = '<div class="module-toolbar">' +
+        '<div class="search-box"><i class="bi bi-search"></i><input class="form-control" placeholder="Search customers..." oninput="App._filterTable(this)"></div>' +
+        '<button class="btn btn-primary" onclick="App.showCustomerModal()"><i class="bi bi-plus-lg me-1"></i>New Customer</button>' +
+        '</div><div class="card"><div class="table-container"><table class="table table-hover" id="dataTable"><thead><tr>' +
+        '<th>Name</th><th>Email</th><th>Phone</th><th>Balance</th><th>Status</th></tr></thead><tbody>';
+      rows.forEach(function(r) {
+        if (r.status==='Deleted') return;
+        html+='<tr onclick="App.navigate(\'customers\',{view:\''+r.customer_id+'\'})"><td>'+_esc(r.name)+'</td><td>'+_esc(r.email)+'</td><td>'+_esc(r.phone)+'</td>' +
+          '<td>'+_fmtMoney(r.balance)+'</td><td>'+_badge(r.status)+'</td></tr>';
+      });
+      html+='</tbody></table></div></div>';
+      c.innerHTML=html;
+    });
+  }
+
+  function _renderCustomerDetail(c, id) {
+    _loading(c);
+    _callModule('customers','get',{id:id},function(cust) {
+      var html = '<a href="javascript:void(0)" class="text-decoration-none mb-3 d-inline-block" onclick="App.navigate(\'customers\')"><i class="bi bi-arrow-left me-1"></i>Back to Customers</a>' +
+        '<div class="detail-header"><div><h4>'+_esc(cust.name)+'</h4><p class="text-muted mb-0">'+_esc(cust.email||'')+' &middot; '+_esc(cust.phone||'')+'</p></div>' +
+        '<div class="detail-meta"><div class="meta-item"><div class="meta-label">Balance</div><div class="meta-value">'+_fmtMoney(cust.balance)+'</div></div>' +
+        '<div class="meta-item"><div class="meta-label">Credit Limit</div><div class="meta-value">'+_fmtMoney(cust.credit_limit)+'</div></div>' +
+        '<div class="meta-item"><div class="meta-label">Terms</div><div class="meta-value">'+(cust.payment_terms||30)+' days</div></div></div></div>' +
+        '<div class="card"><div class="card-header"><span>Recent Invoices</span>' +
+        '<button class="btn btn-sm btn-primary" onclick="App.showInvoiceModal(\''+cust.customer_id+'\',\''+_escAttr(cust.name)+'\')"><i class="bi bi-plus-lg me-1"></i>New Invoice</button></div>' +
+        '<div class="table-container"><table class="table table-hover"><thead><tr><th>Number</th><th>Date</th><th>Total</th><th>Balance</th><th>Status</th></tr></thead><tbody>';
+      (cust.recentInvoices||[]).forEach(function(inv) {
+        html+='<tr onclick="App.navigate(\'invoices\',{view:\''+inv.invoice_id+'\'})"><td>'+_esc(inv.invoice_number)+'</td><td>'+_fmtDate(inv.date)+'</td>' +
+          '<td>'+_fmtMoney(inv.total)+'</td><td>'+_fmtMoney(inv.balance_due)+'</td><td>'+_badge(inv.status)+'</td></tr>';
+      });
+      if (!(cust.recentInvoices||[]).length) html+='<tr><td colspan="5" class="text-center text-muted py-3">No invoices yet</td></tr>';
+      html+='</tbody></table></div></div>';
+      c.innerHTML=html;
+    });
+  }
+
+  function showCustomerModal(existing) {
+    var d = existing||{};
+    var title = d.customer_id ? 'Edit Customer' : 'New Customer';
+    var html = '<div class="modal fade" id="crudModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">' +
+      '<div class="modal-header"><h5 class="modal-title">'+title+'</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>' +
+      '<div class="modal-body"><div class="row g-3">' +
+      '<div class="col-12"><label class="form-label">Name *</label><input class="form-control" id="f_name" value="'+_escAttr(d.name)+'"></div>' +
+      '<div class="col-md-6"><label class="form-label">Email</label><input class="form-control" id="f_email" value="'+_escAttr(d.email)+'"></div>' +
+      '<div class="col-md-6"><label class="form-label">Phone</label><input class="form-control" id="f_phone" value="'+_escAttr(d.phone)+'"></div>' +
+      '<div class="col-12"><label class="form-label">Address</label><input class="form-control" id="f_address" value="'+_escAttr(d.address)+'"></div>' +
+      '<div class="col-md-6"><label class="form-label">City</label><input class="form-control" id="f_city" value="'+_escAttr(d.city)+'"></div>' +
+      '<div class="col-md-6"><label class="form-label">Payment Terms (days)</label><input type="number" class="form-control" id="f_terms" value="'+(d.payment_terms||30)+'"></div>' +
+      '<div class="col-md-6"><label class="form-label">Credit Limit</label><input type="number" class="form-control" id="f_credit" value="'+(d.credit_limit||0)+'"></div>' +
+      '<div class="col-12"><label class="form-label">Notes</label><textarea class="form-control" id="f_notes" rows="2">'+_esc(d.notes||'')+'</textarea></div>' +
+      '</div></div><div class="modal-footer">' +
+      '<button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>' +
+      '<button class="btn btn-primary" onclick="App.saveCustomer(\''+_escAttr(d.customer_id||'')+'\')"><i class="bi bi-check-lg me-1"></i>Save</button>' +
+      '</div></div></div></div>';
+    _showModal(html);
+  }
+
+  function saveCustomer(existingId) {
+    var data = {
+      name: document.getElementById('f_name').value,
+      email: document.getElementById('f_email').value,
+      phone: document.getElementById('f_phone').value,
+      address: document.getElementById('f_address').value,
+      city: document.getElementById('f_city').value,
+      payment_terms: parseInt(document.getElementById('f_terms').value) || 30,
+      credit_limit: parseFloat(document.getElementById('f_credit').value) || 0,
+      notes: document.getElementById('f_notes').value
+    };
+    var action = existingId ? 'update' : 'create';
+    if (existingId) data.customer_id = existingId;
+    showLoading(true);
+    _callModule('customers', action, data, function(r) {
+      showLoading(false); _hideModal();
+      showToast('Customer '+(existingId?'updated':'created'), 'success');
+      navigate('customers');
+    }, function(e) { showLoading(false); showToast(e.message,'danger'); });
+  }
+
+  // ============================================================
+  // INVOICES
+  // ============================================================
+  function _renderInvoices(c, params) {
+    if (params && params.view) { _renderInvoiceDetail(c, params.view); return; }
+    _loading(c);
+    _callModule('invoices','list',{sort:'date',order:'desc'},function(result) {
+      var rows = _data(result);
+      var html = '<div class="module-toolbar">' +
+        '<div class="search-box"><i class="bi bi-search"></i><input class="form-control" placeholder="Search invoices..." oninput="App._filterTable(this)"></div>' +
+        '<button class="btn btn-primary" onclick="App.showInvoiceModal()"><i class="bi bi-plus-lg me-1"></i>New Invoice</button></div>' +
+        '<div class="card"><div class="table-container"><table class="table table-hover" id="dataTable"><thead><tr>' +
+        '<th>Number</th><th>Date</th><th>Customer</th><th>Total</th><th>Paid</th><th>Balance</th><th>Status</th></tr></thead><tbody>';
+      rows.forEach(function(r) {
+        if (r.status==='Cancelled') return;
+        html+='<tr onclick="App.navigate(\'invoices\',{view:\''+r.invoice_id+'\'})"><td>'+_esc(r.invoice_number)+'</td><td>'+_fmtDate(r.date)+'</td>' +
+          '<td>'+_esc(r.customer_name)+'</td><td>'+_fmtMoney(r.total)+'</td><td>'+_fmtMoney(r.amount_paid)+'</td>' +
+          '<td>'+_fmtMoney(r.balance_due)+'</td><td>'+_badge(r.status)+'</td></tr>';
+      });
+      if(!rows.length) html+='<tr><td colspan="7" class="empty-state"><i class="bi bi-receipt-cutoff"></i>No invoices yet</td></tr>';
+      html+='</tbody></table></div></div>';
+      c.innerHTML=html;
+    });
+  }
+
+  function _renderInvoiceDetail(c, id) {
+    _loading(c);
+    _callModule('invoices','get',{id:id},function(inv) {
+      var html = '<a href="javascript:void(0)" class="text-decoration-none mb-3 d-inline-block" onclick="App.navigate(\'invoices\')"><i class="bi bi-arrow-left me-1"></i>Back</a>' +
+        '<div class="detail-header"><div><h4>'+_esc(inv.invoice_number)+'</h4><p class="text-muted mb-0">'+_esc(inv.customer_name)+' &middot; '+_fmtDate(inv.date)+'</p></div>' +
+        '<div class="action-btn-group">';
+      if (inv.status==='Draft') {
+        html+='<button class="btn btn-success" onclick="App.sendInvoice(\''+id+'\')"><i class="bi bi-send me-1"></i>Send & Post</button>';
+      }
+      if (inv.status!=='Cancelled' && inv.status!=='Paid') {
+        html+='<button class="btn btn-outline-danger" onclick="App.cancelInvoice(\''+id+'\')"><i class="bi bi-x-circle me-1"></i>Cancel</button>';
+      }
+      if (inv.status!=='Draft' && inv.status!=='Cancelled') {
+        html+='<button class="btn btn-outline-primary" onclick="App.pdfInvoice(\''+id+'\')"><i class="bi bi-filetype-pdf me-1"></i>PDF</button>' +
+          '<button class="btn btn-outline-primary" onclick="App.emailInvoice(\''+id+'\')"><i class="bi bi-envelope me-1"></i>Email</button>';
+      }
+      if (['Sent','Partial','Overdue'].indexOf(inv.status)!==-1) {
+        html+='<button class="btn btn-success" onclick="App.showReceiptModal(\''+inv.customer_id+'\',\''+_escAttr(inv.customer_name)+'\',\''+inv.invoice_id+'\','+Utils_toFloat(inv.balance_due)+')"><i class="bi bi-cash me-1"></i>Receive Payment</button>';
+      }
+      html+='</div></div>' +
+        '<div class="detail-meta mb-4">'+
+        '<div class="meta-item"><div class="meta-label">Status</div><div>'+_badge(inv.status)+'</div></div>' +
+        '<div class="meta-item"><div class="meta-label">Total</div><div class="meta-value">'+_fmtMoney(inv.total)+'</div></div>' +
+        '<div class="meta-item"><div class="meta-label">Paid</div><div class="meta-value">'+_fmtMoney(inv.amount_paid)+'</div></div>' +
+        '<div class="meta-item"><div class="meta-label">Balance</div><div class="meta-value" style="color:var(--danger);">'+_fmtMoney(inv.balance_due)+'</div></div>' +
+        '<div class="meta-item"><div class="meta-label">Due</div><div class="meta-value">'+_fmtDate(inv.due_date)+'</div></div>' +
+        (inv.journal_ref?'<div class="meta-item"><div class="meta-label">Journal</div><div class="meta-value" style="font-size:0.9rem;">'+_esc(inv.journal_ref)+'</div></div>':'') +
+        '</div>' +
+        '<div class="card mb-3"><div class="card-header"><span>Line Items</span></div>' +
+        '<div class="table-container"><table class="table"><thead><tr><th>#</th><th>Item</th><th class="text-end">Qty</th><th class="text-end">Price</th><th class="text-end">Disc%</th><th class="text-end">Tax</th><th class="text-end">Total</th></tr></thead><tbody>';
+      (inv.items||[]).forEach(function(it,i) {
+        html+='<tr><td>'+(i+1)+'</td><td>'+_esc(it.product_name||it.description)+'</td><td class="text-end">'+it.quantity+'</td>' +
+          '<td class="text-end">'+_fmtMoney(it.unit_price)+'</td><td class="text-end">'+(Utils_toFloat(it.discount_percent)>0?it.discount_percent+'%':'-')+'</td>' +
+          '<td class="text-end">'+_fmtMoney(it.tax_amount)+'</td><td class="text-end">'+_fmtMoney(it.line_total)+'</td></tr>';
+      });
+      html+='</tbody><tfoot><tr class="fw-bold"><td colspan="6" class="text-end">Subtotal</td><td class="text-end">'+_fmtMoney(inv.subtotal)+'</td></tr>';
+      if (Utils_toFloat(inv.discount_amount)>0) html+='<tr><td colspan="6" class="text-end">Discount</td><td class="text-end">-'+_fmtMoney(inv.discount_amount)+'</td></tr>';
+      html+='<tr><td colspan="6" class="text-end">'+(_config.taxName||'VAT')+'</td><td class="text-end">'+_fmtMoney(inv.tax_amount)+'</td></tr>' +
+        '<tr class="fw-bold" style="font-size:1.1rem;"><td colspan="6" class="text-end">Total</td><td class="text-end">'+_fmtMoney(inv.total)+'</td></tr>' +
+        '</tfoot></table></div></div>';
+
+      // Receipts
+      if ((inv.receipts||[]).length) {
+        html+='<div class="card"><div class="card-header"><span>Payments Received</span></div><div class="table-container"><table class="table"><thead><tr><th>Receipt #</th><th>Date</th><th>Method</th><th class="text-end">Amount</th><th>Status</th></tr></thead><tbody>';
+        inv.receipts.forEach(function(r) {
+          html+='<tr><td>'+_esc(r.receipt_number)+'</td><td>'+_fmtDate(r.date)+'</td><td>'+_esc(r.payment_method)+'</td><td class="text-end">'+_fmtMoney(r.amount)+'</td><td>'+_badge(r.status)+'</td></tr>';
+        });
+        html+='</tbody></table></div></div>';
+      }
+      c.innerHTML=html;
+    });
+  }
+
+  function showInvoiceModal(custId, custName) {
+    // First load customers and products for dropdowns
+    _callModule('customers','list',{filters:{status:'Active'},sort:'name',order:'asc'},function(custResult) {
+      _callModule('products','list',{filters:{status:'Active'},sort:'name',order:'asc'},function(prodResult) {
+        var custs = _data(custResult);
+        var prods = _data(prodResult);
+        var custOpts = custs.map(function(c){return '<option value="'+c.customer_id+'" '+(c.customer_id===custId?'selected':'')+'>'+_esc(c.name)+'</option>';}).join('');
+        var prodOpts = '<option value="">-- Select product --</option>'+prods.map(function(p){return '<option value="'+p.product_id+'" data-price="'+p.unit_price+'" data-name="'+_escAttr(p.name)+'">'+_esc(p.name)+' ('+_fmtMoney(p.unit_price)+')</option>';}).join('');
+
+        var html = '<div class="modal fade" id="crudModal" tabindex="-1"><div class="modal-dialog modal-lg"><div class="modal-content">' +
+          '<div class="modal-header"><h5 class="modal-title">New Invoice</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>' +
+          '<div class="modal-body"><div class="row g-3 mb-3">' +
+          '<div class="col-md-6"><label class="form-label">Customer *</label><select class="form-select" id="f_customer">'+custOpts+'</select></div>' +
+          '<div class="col-md-3"><label class="form-label">Date *</label><input type="date" class="form-control" id="f_date" value="'+new Date().toISOString().split('T')[0]+'"></div>' +
+          '<div class="col-md-3"><label class="form-label">Send immediately?</label><div class="form-check mt-1"><input class="form-check-input" type="checkbox" id="f_send"><label class="form-check-label" for="f_send">Yes, post now</label></div></div>' +
+          '</div>' +
+          '<h6>Line Items</h6><table class="table line-items-table" id="lineItemsTable"><thead><tr><th>Product</th><th style="width:70px;">Qty</th><th style="width:100px;">Price</th><th style="width:70px;">Disc%</th><th style="width:90px;">Total</th><th style="width:40px;"></th></tr></thead>' +
+          '<tbody id="lineItemsBody"></tbody></table>' +
+          '<button class="btn btn-sm btn-outline-primary" onclick="App.addLineItem()"><i class="bi bi-plus me-1"></i>Add Item</button>' +
+          '<div class="mt-3"><label class="form-label">Notes</label><textarea class="form-control" id="f_notes" rows="2"></textarea></div>' +
+          '</div><div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>' +
+          '<button class="btn btn-primary" onclick="App.saveInvoice()"><i class="bi bi-check-lg me-1"></i>Save Invoice</button></div></div></div></div>';
+
+        _showModal(html);
+        // Store product options for line items
+        window._prodOpts = prodOpts;
+        addLineItem(); // add first row
+      });
+    });
+  }
+
+  var _lineItemCount = 0;
+  function addLineItem() {
+    _lineItemCount++;
+    var row = '<tr id="li_'+_lineItemCount+'">' +
+      '<td><select class="form-select form-select-sm" onchange="App.onProductSelect(this,'+_lineItemCount+')">'+(window._prodOpts||'')+'</select></td>' +
+      '<td><input type="number" class="form-control form-control-sm" id="li_qty_'+_lineItemCount+'" value="1" min="1" onchange="App.calcLineTotal('+_lineItemCount+')"></td>' +
+      '<td><input type="number" class="form-control form-control-sm" id="li_price_'+_lineItemCount+'" value="0" step="0.01" onchange="App.calcLineTotal('+_lineItemCount+')"></td>' +
+      '<td><input type="number" class="form-control form-control-sm" id="li_disc_'+_lineItemCount+'" value="0" min="0" max="100" onchange="App.calcLineTotal('+_lineItemCount+')"></td>' +
+      '<td><span id="li_total_'+_lineItemCount+'" class="fw-bold">0.00</span><input type="hidden" id="li_pid_'+_lineItemCount+'"><input type="hidden" id="li_pname_'+_lineItemCount+'"></td>' +
+      '<td><button class="btn btn-sm btn-outline-danger" onclick="document.getElementById(\'li_'+_lineItemCount+'\').remove()"><i class="bi bi-trash"></i></button></td></tr>';
+    document.getElementById('lineItemsBody').insertAdjacentHTML('beforeend', row);
+  }
+
+  function onProductSelect(sel, idx) {
+    var opt = sel.options[sel.selectedIndex];
+    var price = opt.getAttribute('data-price') || 0;
+    var name = opt.getAttribute('data-name') || '';
+    document.getElementById('li_price_'+idx).value = price;
+    document.getElementById('li_pid_'+idx).value = sel.value;
+    document.getElementById('li_pname_'+idx).value = name;
+    calcLineTotal(idx);
+  }
+
+  function calcLineTotal(idx) {
+    var qty = parseFloat(document.getElementById('li_qty_'+idx).value)||0;
+    var price = parseFloat(document.getElementById('li_price_'+idx).value)||0;
+    var disc = parseFloat(document.getElementById('li_disc_'+idx).value)||0;
+    var gross = qty * price;
+    var net = gross - (gross * disc / 100);
+    var taxRate = _config.taxRate || 15;
+    var total = net + (net * taxRate / 100);
+    document.getElementById('li_total_'+idx).textContent = total.toFixed(2);
+  }
+
+  function saveInvoice() {
+    var items = [];
+    document.querySelectorAll('#lineItemsBody tr').forEach(function(row) {
+      var idx = row.id.split('_')[1];
+      var qty = parseFloat(document.getElementById('li_qty_'+idx).value)||0;
+      var price = parseFloat(document.getElementById('li_price_'+idx).value)||0;
+      if (qty > 0 && price > 0) {
+        items.push({
+          product_id: document.getElementById('li_pid_'+idx).value,
+          product_name: document.getElementById('li_pname_'+idx).value,
+          quantity: qty,
+          unit_price: price,
+          discount_percent: parseFloat(document.getElementById('li_disc_'+idx).value)||0,
+          tax_rate: _config.taxRate||15
+        });
+      }
+    });
+    if (items.length===0) { showToast('Add at least one item','warning'); return; }
+    var data = {
+      customer_id: document.getElementById('f_customer').value,
+      date: document.getElementById('f_date').value,
+      send: document.getElementById('f_send').checked,
+      notes: document.getElementById('f_notes').value,
+      items: items
+    };
+    showLoading(true);
+    _callModule('invoices','create',data,function(r) {
+      showLoading(false); _hideModal();
+      showToast('Invoice '+r.number+' created ('+r.status+')','success');
+      navigate('invoices',{view:r.id});
+    },function(e){showLoading(false);showToast(e.message,'danger');});
+  }
+
+  function sendInvoice(id) {
+    var html = '<div class="modal fade" id="crudModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">' +
+      '<div class="modal-header"><h5><i class="bi bi-send me-2 text-primary"></i>Send Invoice</h5>' +
+      '<button class="btn-close" data-bs-dismiss="modal"></button></div>' +
+      '<div class="modal-body"><div class="alert alert-info mb-0"><i class="bi bi-info-circle me-2"></i>' +
+      'Sending will <strong>post journal entries</strong> to accounting and <strong>deduct inventory</strong>. ' +
+      'This cannot be undone without cancelling the invoice.</div></div>' +
+      '<div class="modal-footer">' +
+      '<button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>' +
+      '<button class="btn btn-primary" onclick="App._doSendInvoice(\''+ id +'\')">' +
+      '<i class="bi bi-send me-1"></i>Send & Post</button>' +
+      '</div></div></div></div>';
+    _showModal(html);
+  }
+  function _doSendInvoice(id) {
+    _hideModal(); showLoading(true);
+    google.script.run.withSuccessHandler(function(r) {
+      showLoading(false); showToast('Invoice sent. Journal: '+(r.journalRef||'—'),'success');
+      navigate('invoices',{view:id});
+    }).withFailureHandler(function(e){showLoading(false);showToast(e.message,'danger');}).sendInvoice(id);
+  }
+
+  function cancelInvoice(id) {
+    var html = '<div class="modal fade" id="crudModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">' +
+      '<div class="modal-header"><h5><i class="bi bi-x-circle me-2 text-danger"></i>Cancel Invoice</h5>' +
+      '<button class="btn-close" data-bs-dismiss="modal"></button></div>' +
+      '<div class="modal-body"><div class="alert alert-warning mb-0"><i class="bi bi-exclamation-triangle me-2"></i>' +
+      'Cancelling will <strong>reverse all journal entries</strong> and <strong>restore inventory</strong> for this invoice. ' +
+      'The invoice status will be set to Cancelled.</div></div>' +
+      '<div class="modal-footer">' +
+      '<button class="btn btn-secondary" data-bs-dismiss="modal">Keep Invoice</button>' +
+      '<button class="btn btn-danger" onclick="App._doCancelInvoice(\''+ id +'\')">' +
+      '<i class="bi bi-x-circle me-1"></i>Yes, Cancel Invoice</button>' +
+      '</div></div></div></div>';
+    _showModal(html);
+  }
+  function _doCancelInvoice(id) {
+    _hideModal(); showLoading(true);
+    google.script.run.withSuccessHandler(function() {
+      showLoading(false); showToast('Invoice cancelled and journal reversed','success'); navigate('invoices');
+    }).withFailureHandler(function(e){showLoading(false);showToast(e.message,'danger');}).cancelInvoice(id);
+  }
+
+  function pdfInvoice(id) {
+    showLoading(true);
+    google.script.run.withSuccessHandler(function(r) {
+      showLoading(false);
+      showToast('PDF generated','success');
+      window.open(r.fileUrl,'_blank');
+    }).withFailureHandler(function(e){showLoading(false);showToast(e.message,'danger');}).generateInvoicePdf(id);
+  }
+
+  function emailInvoice(id) {
+    var html = '<div class="modal fade" id="crudModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">' +
+      '<div class="modal-header"><h5><i class="bi bi-envelope me-2"></i>Email Invoice</h5>' +
+      '<button class="btn-close" data-bs-dismiss="modal"></button></div>' +
+      '<div class="modal-body"><label class="form-label">Recipient Email Address</label>' +
+      '<input type="email" class="form-control" id="emailTo" placeholder="customer@example.com"></div>' +
+      '<div class="modal-footer">' +
+      '<button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>' +
+      '<button class="btn btn-primary" onclick="App._doEmailInvoice(\''+ id +'\')">' +
+      '<i class="bi bi-send me-1"></i>Send Email</button>' +
+      '</div></div></div></div>';
+    _showModal(html);
+  }
+  function _doEmailInvoice(id) {
+    var email = (document.getElementById('emailTo')||{}).value;
+    if (!email) { showToast('Email address required','warning'); return; }
+    _hideModal();
+    showLoading(true);
+    google.script.run.withSuccessHandler(function(r) {
+      showLoading(false); showToast(r.message,'success');
+    }).withFailureHandler(function(e){showLoading(false);showToast(e.message,'danger');}).emailInvoice(id, email);
+  }
+
+  // ============================================================
+  // RECEIPTS
+  // ============================================================
+  function _renderReceipts(c) {
+    _loading(c);
+    _callModule('receipts','list',{sort:'date',order:'desc'},function(result) {
+      var rows=_data(result);
+      var html='<div class="module-toolbar"><div class="search-box"><i class="bi bi-search"></i><input class="form-control" placeholder="Search receipts..." oninput="App._filterTable(this)"></div>' +
+        '<button class="btn btn-primary" onclick="App.showReceiptModal()"><i class="bi bi-plus-lg me-1"></i>New Receipt</button></div>' +
+        '<div class="card"><div class="table-container"><table class="table table-hover" id="dataTable"><thead><tr><th>Number</th><th>Date</th><th>Customer</th><th>Method</th><th class="text-end">Amount</th><th>Status</th></tr></thead><tbody>';
+      rows.forEach(function(r){
+        html+='<tr><td>'+_esc(r.receipt_number)+'</td><td>'+_fmtDate(r.date)+'</td><td>'+_esc(r.customer_name)+'</td>' +
+          '<td>'+_esc(r.payment_method)+'</td><td class="text-end">'+_fmtMoney(r.amount)+'</td><td>'+_badge(r.status)+'</td></tr>';
+      });
+      if(!rows.length) html+='<tr><td colspan="6" class="empty-state"><i class="bi bi-cash-coin"></i>No receipts yet</td></tr>';
+      html+='</tbody></table></div></div>';
+      c.innerHTML=html;
+    });
+  }
+
+  function showReceiptModal(custId, custName, invId, balance) {
+    // Load customers and their unpaid invoices
+    _callModule('customers','list',{filters:{status:'Active'},sort:'name',order:'asc'},function(custResult) {
+      var custs=_data(custResult);
+      var custOpts=custs.map(function(c){return '<option value="'+c.customer_id+'" '+(c.customer_id===custId?'selected':'')+'>'+_esc(c.name)+'</option>';}).join('');
+      var methods=['Cash','Bank Transfer','Mobile Money','Cheque','Card'];
+      var methOpts=methods.map(function(m){return '<option>'+m+'</option>';}).join('');
+
+      var html='<div class="modal fade" id="crudModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">' +
+        '<div class="modal-header"><h5 class="modal-title">Receive Payment</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>' +
+        '<div class="modal-body"><div class="row g-3">' +
+        '<div class="col-12"><label class="form-label">Customer *</label><select class="form-select" id="f_rcust" onchange="App.loadCustomerInvoices()">'+custOpts+'</select></div>' +
+        '<div class="col-12"><label class="form-label">Invoice *</label><select class="form-select" id="f_rinv"><option value="">Loading invoices...</option></select></div>' +
+        '<div class="col-md-6"><label class="form-label">Amount *</label><input type="number" class="form-control" id="f_ramount" step="0.01" value="'+(balance||0)+'"></div>' +
+        '<div class="col-md-6"><label class="form-label">Payment Method *</label><select class="form-select" id="f_rmethod">'+methOpts+'</select></div>' +
+        '<div class="col-md-6"><label class="form-label">Date *</label><input type="date" class="form-control" id="f_rdate" value="'+new Date().toISOString().split('T')[0]+'"></div>' +
+        '<div class="col-md-6"><label class="form-label">Reference</label><input class="form-control" id="f_rref"></div>' +
+        '<div class="col-12"><label class="form-label">Notes</label><textarea class="form-control" id="f_rnotes" rows="2"></textarea></div>' +
+        '</div></div><div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>' +
+        '<button class="btn btn-success" onclick="App.saveReceipt()"><i class="bi bi-check-lg me-1"></i>Save Receipt</button></div></div></div></div>';
+
+      _showModal(html);
+      // Load invoices for selected customer
+      if (invId) {
+        // Pre-select invoice
+        var invSel=document.getElementById('f_rinv');
+        invSel.innerHTML='<option value="'+invId+'" selected>'+invId+' (Balance: '+_fmtMoney(balance)+')</option>';
+      }
+      loadCustomerInvoices();
+    });
+  }
+
+  function loadCustomerInvoices() {
+    var custId=document.getElementById('f_rcust').value;
+    if(!custId) return;
+    _callModule('invoices','list',{filters:{customer_id:custId},sort:'date',order:'desc'},function(r) {
+      var invSel=document.getElementById('f_rinv');
+      var opts='<option value="">-- Select invoice --</option>';
+      (_data(r)).forEach(function(inv) {
+        if (['Sent','Partial','Overdue'].indexOf(inv.status)!==-1) {
+          opts+='<option value="'+inv.invoice_id+'" data-balance="'+inv.balance_due+'">'+_esc(inv.invoice_number)+' - Balance: '+_fmtMoney(inv.balance_due)+'</option>';
+        }
+      });
+      invSel.innerHTML=opts;
+      invSel.onchange=function() {
+        var opt=invSel.options[invSel.selectedIndex];
+        var bal=opt?opt.getAttribute('data-balance'):0;
+        if(bal) document.getElementById('f_ramount').value=bal;
+      };
+    });
+  }
+
+  function saveReceipt() {
+    var data={
+      customer_id: document.getElementById('f_rcust').value,
+      invoice_id: document.getElementById('f_rinv').value,
+      amount: parseFloat(document.getElementById('f_ramount').value)||0,
+      payment_method: document.getElementById('f_rmethod').value,
+      date: document.getElementById('f_rdate').value,
+      reference: document.getElementById('f_rref').value,
+      notes: document.getElementById('f_rnotes').value
+    };
+    if(!data.invoice_id){showToast('Select an invoice','warning');return;}
+    if(data.amount<=0){showToast('Enter a positive amount','warning');return;}
+    showLoading(true);
+    _callModule('receipts','create',data,function(r){
+      showLoading(false);_hideModal();
+      showToast('Receipt '+r.number+' created. Invoice now: '+r.invoiceStatus,'success');
+      navigate('receipts');
+    },function(e){showLoading(false);showToast(e.message,'danger');});
+  }
+
+  // ============================================================
+  // QUOTATIONS
+  // ============================================================
+  function _renderQuotations(c, params) {
+    _loading(c);
+    _callModule('quotations','list',{sort:'date',order:'desc'},function(result){
+      var rows=_data(result);
+      var html='<div class="module-toolbar"><div class="search-box"><i class="bi bi-search"></i><input class="form-control" placeholder="Search quotations..." oninput="App._filterTable(this)"></div>' +
+        '<button class="btn btn-primary" onclick="App.showQuotationModal()"><i class="bi bi-plus-lg me-1"></i>New Quotation</button></div>' +
+        '<div class="card"><div class="table-container"><table class="table table-hover" id="dataTable"><thead><tr><th>Number</th><th>Date</th><th>Customer</th><th class="text-end">Total</th><th>Expiry</th><th>Status</th><th>Actions</th></tr></thead><tbody>';
+      rows.forEach(function(r){
+        var actions='';
+        if (r.status==='Accepted'||r.status==='Sent'||r.status==='Draft') {
+          actions='<button class="btn btn-sm btn-outline-success" onclick="event.stopPropagation();App.convertQuotation(\''+r.quotation_id+'\')"><i class="bi bi-arrow-right-circle me-1"></i>Convert</button>';
+        }
+        html+='<tr><td>'+_esc(r.quotation_number)+'</td><td>'+_fmtDate(r.date)+'</td><td>'+_esc(r.customer_name)+'</td>' +
+          '<td class="text-end">'+_fmtMoney(r.total)+'</td><td>'+_fmtDate(r.expiry_date)+'</td><td>'+_badge(r.status)+'</td><td>'+actions+'</td></tr>';
+      });
+      if(!rows.length) html+='<tr><td colspan="7" class="empty-state"><i class="bi bi-file-earmark-text"></i>No quotations yet</td></tr>';
+      html+='</tbody></table></div></div>';
+      c.innerHTML=html;
+    });
+  }
+
+  function showQuotationModal() {
+    _callModule('customers','list',{filters:{status:'Active'},sort:'name',order:'asc'},function(cr){
+      _callModule('products','list',{filters:{status:'Active'},sort:'name',order:'asc'},function(pr){
+        var custs=_data(cr); var prods=_data(pr);
+        var custOpts=custs.map(function(c){return '<option value="'+c.customer_id+'">'+_esc(c.name)+'</option>';}).join('');
+        window._prodOpts='<option value="">-- Select --</option>'+prods.map(function(p){return '<option value="'+p.product_id+'" data-price="'+p.unit_price+'" data-name="'+_escAttr(p.name)+'">'+_esc(p.name)+' ('+_fmtMoney(p.unit_price)+')</option>';}).join('');
+
+        var html='<div class="modal fade" id="crudModal" tabindex="-1"><div class="modal-dialog modal-lg"><div class="modal-content">' +
+          '<div class="modal-header"><h5 class="modal-title">New Quotation</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>' +
+          '<div class="modal-body"><div class="row g-3 mb-3">' +
+          '<div class="col-md-5"><label class="form-label">Customer *</label><select class="form-select" id="f_customer">'+custOpts+'</select></div>' +
+          '<div class="col-md-3"><label class="form-label">Date *</label><input type="date" class="form-control" id="f_date" value="'+new Date().toISOString().split('T')[0]+'"></div>' +
+          '<div class="col-md-4"><label class="form-label">Valid for (days)</label><input type="number" class="form-control" id="f_validity" value="30"></div></div>' +
+          '<h6>Line Items</h6><table class="table line-items-table" id="lineItemsTable"><thead><tr><th>Product</th><th style="width:70px;">Qty</th><th style="width:100px;">Price</th><th style="width:70px;">Disc%</th><th style="width:90px;">Total</th><th style="width:40px;"></th></tr></thead>' +
+          '<tbody id="lineItemsBody"></tbody></table>' +
+          '<button class="btn btn-sm btn-outline-primary" onclick="App.addLineItem()"><i class="bi bi-plus me-1"></i>Add Item</button>' +
+          '<div class="mt-3"><label class="form-label">Notes</label><textarea class="form-control" id="f_notes" rows="2"></textarea></div>' +
+          '</div><div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>' +
+          '<button class="btn btn-primary" onclick="App.saveQuotation()"><i class="bi bi-check-lg me-1"></i>Save Quotation</button></div></div></div></div>';
+        _showModal(html);
+        _lineItemCount=0; addLineItem();
+      });
+    });
+  }
+
+  function saveQuotation() {
+    var items=[];
+    document.querySelectorAll('#lineItemsBody tr').forEach(function(row){
+      var idx=row.id.split('_')[1];
+      var qty=parseFloat(document.getElementById('li_qty_'+idx).value)||0;
+      var price=parseFloat(document.getElementById('li_price_'+idx).value)||0;
+      if(qty>0&&price>0) items.push({
+        product_id: document.getElementById('li_pid_'+idx).value,
+        product_name: document.getElementById('li_pname_'+idx).value,
+        quantity:qty, unit_price:price,
+        discount_percent: parseFloat(document.getElementById('li_disc_'+idx).value)||0,
+        tax_rate: _config.taxRate||15
+      });
+    });
+    if(!items.length){showToast('Add at least one item','warning');return;}
+    showLoading(true);
+    _callModule('quotations','create',{
+      customer_id: document.getElementById('f_customer').value,
+      date: document.getElementById('f_date').value,
+      validity_days: parseInt(document.getElementById('f_validity').value)||30,
+      notes: document.getElementById('f_notes').value,
+      items: items
+    },function(r){
+      showLoading(false);_hideModal();
+      showToast('Quotation '+r.number+' created','success');
+      navigate('quotations');
+    },function(e){showLoading(false);showToast(e.message,'danger');});
+  }
+
+  function convertQuotation(id) {
+    var html = '<div class="modal fade" id="crudModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">' +
+      '<div class="modal-header"><h5><i class="bi bi-arrow-right-circle me-2 text-success"></i>Convert to Invoice</h5>' +
+      '<button class="btn-close" data-bs-dismiss="modal"></button></div>' +
+      '<div class="modal-body"><div class="alert alert-info mb-0"><i class="bi bi-info-circle me-2"></i>' +
+      'A new draft invoice will be created with all the line items from this quotation. ' +
+      'The quotation status will be set to Converted.</div></div>' +
+      '<div class="modal-footer">' +
+      '<button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>' +
+      '<button class="btn btn-success" onclick="App._doConvertQuotation(\''+ id +'\')">' +
+      '<i class="bi bi-arrow-right-circle me-1"></i>Convert to Invoice</button>' +
+      '</div></div></div></div>';
+    _showModal(html);
+  }
+  function _doConvertQuotation(id) {
+    _hideModal(); showLoading(true);
+    google.script.run.withSuccessHandler(function(r){
+      showLoading(false);
+      showToast('Quotation converted — Invoice '+(r.invoiceNumber||''),'success');
+      navigate('invoices',{view:r.invoiceId});
+    }).withFailureHandler(function(e){showLoading(false);showToast(e.message,'danger');}).convertQuotation(id);
+  }
+
+  // ============================================================
+  // ACCOUNTING
+  // ============================================================
+  function _renderAccounting(c) {
+    c.innerHTML='<ul class="nav nav-tabs mb-3" role="tablist">' +
+      '<li class="nav-item"><a class="nav-link active" href="javascript:void(0)" onclick="App._loadAccTab(\'trial\')">Trial Balance</a></li>' +
+      '<li class="nav-item"><a class="nav-link" href="javascript:void(0)" onclick="App._loadAccTab(\'coa\')">Chart of Accounts</a></li>' +
+      '<li class="nav-item"><a class="nav-link" href="javascript:void(0)" onclick="App._loadAccTab(\'journal\')">Journal Entries</a></li>' +
+      '<li class="nav-item"><a class="nav-link" href="javascript:void(0)" onclick="App._loadAccTab(\'ledger\')">General Ledger</a></li>' +
+      '<li class="nav-item"><a class="nav-link" href="javascript:void(0)" onclick="App._loadAccTab(\'statements\')">Financial Statements</a></li>' +
+      '<li class="nav-item"><a class="nav-link" href="javascript:void(0)" onclick="App._loadAccTab(\'periods\')">Periods</a></li>' +
+      '</ul><div id="accTabContent"><div class="module-loading"><div class="spinner-border text-primary"></div></div></div>';
+    _loadAccTab('trial');
+  }
+
+  function _loadAccTab(tab) {
+    document.querySelectorAll('.nav-tabs .nav-link').forEach(function(l){l.classList.remove('active');});
+    try { if (typeof event !== 'undefined' && event && event.target) event.target.classList.add('active'); } catch(e) {}
+    document.querySelectorAll('.nav-tabs .nav-link').forEach(function(l) {
+      var attr = l.getAttribute('onclick') || '';
+      if (attr.indexOf("'" + tab + "'") !== -1 || attr.indexOf('"' + tab + '"') !== -1) l.classList.add('active');
+    });
+    var c=document.getElementById('accTabContent');
+    c.innerHTML='<div class="module-loading"><div class="spinner-border text-primary"></div></div>';
+
+    if(tab==='trial') {
+      google.script.run.withSuccessHandler(function(tb){
+        var html='<div class="d-flex justify-content-end mb-2">' +
+          '<button class="btn btn-sm btn-outline-secondary" onclick="App.validateBooks()"><i class="bi bi-shield-check me-1"></i>Validate Books</button></div>' +
+          '<div class="card"><div class="card-header"><span>Trial Balance</span>' +
+          '<span class="badge '+(tb.balanced?'bg-success':'bg-danger')+'">'+(tb.balanced?'Balanced':'Unbalanced')+'</span></div>' +
+          '<div class="table-container"><table class="table"><thead><tr><th>Code</th><th>Account</th><th>Type</th><th class="text-end">Debit</th><th class="text-end">Credit</th></tr></thead><tbody>';
+        (tb.accounts||[]).forEach(function(a){
+          html+='<tr><td>'+_esc(a.accountCode)+'</td><td>'+_esc(a.accountName)+'</td><td>'+_esc(a.accountType)+'</td>' +
+            '<td class="text-end">'+(a.debit?_fmtMoney(a.debit):'-')+'</td><td class="text-end">'+(a.credit?_fmtMoney(a.credit):'-')+'</td></tr>';
+        });
+        html+='</tbody><tfoot><tr class="fw-bold"><td colspan="3" class="text-end">Totals</td><td class="text-end">'+_fmtMoney(tb.totalDebits)+'</td><td class="text-end">'+_fmtMoney(tb.totalCredits)+'</td></tr></tfoot></table></div></div>';
+        c.innerHTML=html;
+      }).withFailureHandler(function(e){c.innerHTML='<div class="alert alert-danger">'+e.message+'</div>';}).getTrialBalance();
+
+    } else if(tab==='coa') {
+      _callModule('accounts','list',{sort:'account_code',order:'asc'},function(r){
+        var html='<div class="module-toolbar"><div class="search-box"><i class="bi bi-search"></i>' +
+          '<input class="form-control" placeholder="Search accounts..." oninput="App._filterTable(this)"></div>' +
+          '<button class="btn btn-primary" onclick="App.showAccountModal()"><i class="bi bi-plus-lg me-1"></i>New Account</button></div>' +
+          '<div class="card"><div class="table-container"><table class="table" id="dataTable"><thead><tr><th>Code</th><th>Name</th><th>Type</th><th>Normal</th><th class="text-end">Balance</th><th>Active</th></tr></thead><tbody>';
+        (_data(r)).forEach(function(a){
+          html+='<tr><td>'+_esc(a.account_code)+'</td><td>'+_esc(a.account_name)+'</td><td>'+_esc(a.account_type)+'</td><td>'+_esc(a.normal_balance)+'</td>' +
+            '<td class="text-end">'+_fmtMoney(a.balance)+'</td><td>'+(a.is_active?'<i class="bi bi-check-circle text-success"></i>':'<i class="bi bi-x-circle text-muted"></i>')+'</td></tr>';
+        });
+        html+='</tbody></table></div></div>';
+        c.innerHTML=html;
+      });
+
+    } else if(tab==='journal') {
+      var html='<div class="module-toolbar"><div class="search-box"><i class="bi bi-search"></i>' +
+        '<input class="form-control" placeholder="Search journal entries..." oninput="App._filterTable(this)"></div>' +
+        '<button class="btn btn-primary" onclick="App.showJournalModal()"><i class="bi bi-plus-lg me-1"></i>New Journal Entry</button></div>' +
+        '<div id="journalList"></div>';
+      c.innerHTML=html;
+      _callModule('journal','list',{sort:'date',order:'desc',limit:200},function(r){
+        var t='<div class="card"><div class="table-container"><table class="table table-hover" id="dataTable"><thead><tr><th>Entry #</th><th>Date</th><th>Account</th><th>Description</th><th class="text-end">Debit</th><th class="text-end">Credit</th><th>Status</th></tr></thead><tbody>';
+        (_data(r)).forEach(function(j){
+          t+='<tr><td>'+_esc(j.entry_number)+'</td><td>'+_fmtDate(j.date)+'</td><td><small>'+_esc(j.account_code)+' '+_esc(j.account_name)+'</small></td>' +
+            '<td><small>'+_esc(j.description)+'</small></td><td class="text-end">'+(Utils_toFloat(j.debit)?_fmtMoney(j.debit):'-')+'</td>' +
+            '<td class="text-end">'+(Utils_toFloat(j.credit)?_fmtMoney(j.credit):'-')+'</td><td>'+_badge(j.status)+'</td></tr>';
+        });
+        t+='</tbody></table></div></div>';
+        document.getElementById('journalList').innerHTML=t;
+      });
+
+    } else if(tab==='ledger') {
+      _renderLedgerTab(c);
+
+    } else if(tab==='statements') {
+      _renderStatementsTab(c);
+
+    } else if(tab==='periods') {
+      _renderPeriodsTab(c);
+    }
+  }
+
+  // ── General Ledger tab ──
+  function _renderLedgerTab(c) {
+    var today=new Date().toISOString().split('T')[0];
+    var monthStart=new Date(new Date().getFullYear(),new Date().getMonth(),1).toISOString().split('T')[0];
+    c.innerHTML='<div class="card mb-3"><div class="card-body d-flex flex-wrap gap-2 align-items-end">' +
+      '<div><label class="form-label small mb-1">From</label><input type="date" class="form-control form-control-sm" id="glStart" value="'+monthStart+'"></div>' +
+      '<div><label class="form-label small mb-1">To</label><input type="date" class="form-control form-control-sm" id="glEnd" value="'+today+'"></div>' +
+      '<button class="btn btn-sm btn-primary" onclick="App.loadLedger()"><i class="bi bi-funnel me-1"></i>Apply</button>' +
+      '</div></div><div id="glContent"><div class="module-loading"><div class="spinner-border text-primary"></div></div></div>';
+    loadLedger();
+  }
+  function loadLedger() {
+    var start=document.getElementById('glStart').value;
+    var end=document.getElementById('glEnd').value;
+    var el=document.getElementById('glContent');
+    el.innerHTML='<div class="module-loading"><div class="spinner-border text-primary"></div></div>';
+    google.script.run.withSuccessHandler(function(gl){
+      var html='';
+      (gl.accounts||[]).forEach(function(a){
+        if(!a.entries.length && !a.opening && !a.closing) return;
+        html+='<div class="card mb-2"><div class="card-header d-flex justify-content-between">' +
+          '<span><strong>'+_esc(a.code)+'</strong> '+_esc(a.name)+' <small class="text-muted">('+_esc(a.type)+')</small></span>' +
+          '<span class="small">Opening: '+_fmtMoney(a.opening)+' &middot; Closing: <strong>'+_fmtMoney(a.closing)+'</strong></span></div>' +
+          '<div class="table-container"><table class="table table-sm mb-0"><thead><tr><th>Date</th><th>Description</th><th class="text-end">Debit</th><th class="text-end">Credit</th></tr></thead><tbody>';
+        a.entries.forEach(function(e){
+          html+='<tr><td>'+_fmtDate(e.date)+'</td><td><small>'+_esc(e.description)+'</small></td>' +
+            '<td class="text-end">'+(e.debit?_fmtMoney(e.debit):'-')+'</td><td class="text-end">'+(e.credit?_fmtMoney(e.credit):'-')+'</td></tr>';
+        });
+        html+='</tbody></table></div></div>';
+      });
+      if(!html) html='<div class="empty-state"><i class="bi bi-journal-x"></i>No ledger activity in this range</div>';
+      el.innerHTML=html;
+    }).withFailureHandler(function(e){el.innerHTML='<div class="alert alert-danger">'+e.message+'</div>';}).getGeneralLedger({start:start,end:end});
+  }
+
+  // ── Financial Statements tab ──
+  function _renderStatementsTab(c) {
+    var today=new Date().toISOString().split('T')[0];
+    var yearStart=new Date(new Date().getFullYear(),0,1).toISOString().split('T')[0];
+    c.innerHTML='<div class="card mb-3"><div class="card-body d-flex flex-wrap gap-2 align-items-end">' +
+      '<div><label class="form-label small mb-1">Period Start (P&L)</label><input type="date" class="form-control form-control-sm" id="stStart" value="'+yearStart+'"></div>' +
+      '<div><label class="form-label small mb-1">As of / Period End</label><input type="date" class="form-control form-control-sm" id="stEnd" value="'+today+'"></div>' +
+      '<button class="btn btn-sm btn-primary" onclick="App.loadStatements()"><i class="bi bi-arrow-repeat me-1"></i>Generate</button>' +
+      '</div></div><div class="row g-3"><div class="col-lg-6" id="plContent"></div><div class="col-lg-6" id="bsContent"></div></div>';
+    loadStatements();
+  }
+  function loadStatements() {
+    var start=document.getElementById('stStart').value;
+    var end=document.getElementById('stEnd').value;
+    var plEl=document.getElementById('plContent');
+    var bsEl=document.getElementById('bsContent');
+    plEl.innerHTML=bsEl.innerHTML='<div class="module-loading"><div class="spinner-border text-primary"></div></div>';
+
+    google.script.run.withSuccessHandler(function(pl){
+      var h='<div class="card"><div class="card-header">Profit &amp; Loss</div><div class="table-container"><table class="table table-sm mb-0"><tbody>';
+      h+='<tr class="table-light"><td colspan="2"><strong>Revenue</strong></td></tr>';
+      (pl.revenue||[]).forEach(function(r){h+='<tr><td class="ps-3">'+_esc(r.name)+'</td><td class="text-end">'+_fmtMoney(r.amount)+'</td></tr>';});
+      h+='<tr><td class="ps-3 fw-bold">Total Revenue</td><td class="text-end fw-bold">'+_fmtMoney(pl.totalRevenue)+'</td></tr>';
+      h+='<tr class="table-light"><td colspan="2"><strong>Cost of Goods Sold</strong></td></tr>';
+      (pl.cogs||[]).forEach(function(r){h+='<tr><td class="ps-3">'+_esc(r.name)+'</td><td class="text-end">'+_fmtMoney(r.amount)+'</td></tr>';});
+      h+='<tr><td class="ps-3 fw-bold">Gross Profit</td><td class="text-end fw-bold">'+_fmtMoney(pl.grossProfit)+'</td></tr>';
+      h+='<tr class="table-light"><td colspan="2"><strong>Operating Expenses</strong></td></tr>';
+      (pl.expenses||[]).forEach(function(r){h+='<tr><td class="ps-3">'+_esc(r.name)+'</td><td class="text-end">'+_fmtMoney(r.amount)+'</td></tr>';});
+      h+='<tr><td class="ps-3 fw-bold">Total Expenses</td><td class="text-end fw-bold">'+_fmtMoney(pl.totalExpenses)+'</td></tr>';
+      h+='<tr class="'+(pl.netProfit>=0?'table-success':'table-danger')+'"><td><strong>Net '+(pl.netProfit>=0?'Profit':'Loss')+'</strong></td><td class="text-end"><strong>'+_fmtMoney(pl.netProfit)+'</strong></td></tr>';
+      h+='<tr><td class="small text-muted">Gross Margin '+pl.grossMargin+'% &middot; Net Margin '+pl.netMargin+'%</td><td></td></tr>';
+      h+='</tbody></table></div></div>';
+      plEl.innerHTML=h;
+    }).withFailureHandler(function(e){plEl.innerHTML='<div class="alert alert-danger">'+e.message+'</div>';}).getProfitAndLoss({start:start,end:end});
+
+    google.script.run.withSuccessHandler(function(bs){
+      var h='<div class="card"><div class="card-header d-flex justify-content-between"><span>Balance Sheet</span>' +
+        '<span class="badge '+(bs.balanced?'bg-success':'bg-danger')+'">'+(bs.balanced?'Balanced':'Out by '+_fmtMoney(bs.difference))+'</span></div>' +
+        '<div class="table-container"><table class="table table-sm mb-0"><tbody>';
+      h+='<tr class="table-light"><td colspan="2"><strong>Assets</strong></td></tr>';
+      (bs.assets||[]).forEach(function(r){h+='<tr><td class="ps-3">'+_esc(r.name)+'</td><td class="text-end">'+_fmtMoney(r.amount)+'</td></tr>';});
+      h+='<tr><td class="ps-3 fw-bold">Total Assets</td><td class="text-end fw-bold">'+_fmtMoney(bs.totalAssets)+'</td></tr>';
+      h+='<tr class="table-light"><td colspan="2"><strong>Liabilities</strong></td></tr>';
+      (bs.liabilities||[]).forEach(function(r){h+='<tr><td class="ps-3">'+_esc(r.name)+'</td><td class="text-end">'+_fmtMoney(r.amount)+'</td></tr>';});
+      h+='<tr><td class="ps-3 fw-bold">Total Liabilities</td><td class="text-end fw-bold">'+_fmtMoney(bs.totalLiabilities)+'</td></tr>';
+      h+='<tr class="table-light"><td colspan="2"><strong>Equity</strong></td></tr>';
+      (bs.equity||[]).forEach(function(r){h+='<tr><td class="ps-3">'+_esc(r.name)+'</td><td class="text-end">'+_fmtMoney(r.amount)+'</td></tr>';});
+      h+='<tr><td class="ps-3 fw-bold">Total Equity</td><td class="text-end fw-bold">'+_fmtMoney(bs.totalEquity)+'</td></tr>';
+      h+='<tr class="table-active"><td><strong>Liabilities + Equity</strong></td><td class="text-end"><strong>'+_fmtMoney(bs.totalLiabilitiesAndEquity)+'</strong></td></tr>';
+      h+='</tbody></table></div></div>';
+      bsEl.innerHTML=h;
+    }).withFailureHandler(function(e){bsEl.innerHTML='<div class="alert alert-danger">'+e.message+'</div>';}).getBalanceSheet({asOf:end});
+  }
+
+  // ── Periods tab ──
+  function _renderPeriodsTab(c) {
+    var thisMonth=new Date().toISOString().slice(0,7);
+    c.innerHTML='<div class="card mb-3"><div class="card-body d-flex flex-wrap gap-2 align-items-end">' +
+      '<div><label class="form-label small mb-1">Period to close (yyyy-MM)</label><input type="month" class="form-control form-control-sm" id="closePeriod" value="'+thisMonth+'"></div>' +
+      '<button class="btn btn-sm btn-warning" onclick="App.doClosePeriod()"><i class="bi bi-lock me-1"></i>Close Period</button>' +
+      '</div><div class="card-footer small text-muted">Closing a period posts a journal that transfers net income to Retained Earnings and locks the period against further postings.</div></div>' +
+      '<div id="periodsList"><div class="module-loading"><div class="spinner-border text-primary"></div></div></div>';
+    _loadPeriods();
+  }
+  function _loadPeriods() {
+    google.script.run.withSuccessHandler(function(periods){
+      var html='<div class="card"><div class="card-header">Period History</div><div class="table-container"><table class="table"><thead><tr><th>Period</th><th>Status</th><th class="text-end">Net Income</th><th>Closed By</th><th>Closed At</th><th></th></tr></thead><tbody>';
+      if(!periods.length) html+='<tr><td colspan="6" class="text-center text-muted py-3">No periods closed yet</td></tr>';
+      periods.forEach(function(p){
+        html+='<tr><td><strong>'+_esc(p.period)+'</strong></td><td>'+_badge(p.status)+'</td>' +
+          '<td class="text-end">'+_fmtMoney(p.net_income)+'</td><td><small>'+_esc(p.closed_by||'-')+'</small></td>' +
+          '<td><small>'+(p.closed_at?_fmtDate(p.closed_at):'-')+'</small></td>' +
+          '<td>'+(p.status==='Closed'?'<button class="btn btn-sm btn-outline-danger" onclick="App.doReopenPeriod(\''+_esc(p.period)+'\')">Reopen</button>':'')+'</td></tr>';
+      });
+      html+='</tbody></table></div></div>';
+      document.getElementById('periodsList').innerHTML=html;
+    }).withFailureHandler(function(e){document.getElementById('periodsList').innerHTML='<div class="alert alert-danger">'+e.message+'</div>';}).listPeriods();
+  }
+  function doClosePeriod() {
+    var period=document.getElementById('closePeriod').value;
+    if(!period){showToast('Select a period','warning');return;}
+    var html='<div class="modal fade" id="crudModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">' +
+      '<div class="modal-header"><h5><i class="bi bi-lock me-2 text-warning"></i>Close Period '+period+'</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>' +
+      '<div class="modal-body"><div class="alert alert-warning mb-2"><i class="bi bi-exclamation-triangle me-2"></i>This posts a closing entry transferring net income to Retained Earnings and locks '+period+' against new postings.</div>' +
+      '<label class="form-label">Notes (optional)</label><textarea class="form-control" id="closeNotes" rows="2"></textarea></div>' +
+      '<div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>' +
+      '<button class="btn btn-warning" onclick="App._doCloseConfirmed(\''+period+'\')"><i class="bi bi-lock me-1"></i>Close Period</button></div></div></div></div>';
+    _showModal(html);
+  }
+  function _doCloseConfirmed(period) {
+    var notes=(document.getElementById('closeNotes')||{}).value||'';
+    _hideModal();showLoading(true);
+    google.script.run.withSuccessHandler(function(r){
+      showLoading(false);
+      showToast('Period '+r.period+' closed. Net income: '+_fmtMoney(r.netIncome),'success');
+      _loadPeriods();
+    }).withFailureHandler(function(e){showLoading(false);showToast(e.message,'danger');}).closePeriod({period:period,notes:notes});
+  }
+  function doReopenPeriod(period) {
+    var html='<div class="modal fade" id="crudModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">' +
+      '<div class="modal-header"><h5><i class="bi bi-unlock me-2 text-danger"></i>Reopen Period '+period+'</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>' +
+      '<div class="modal-body"><div class="alert alert-danger mb-2"><i class="bi bi-exclamation-octagon me-2"></i>Reopening reverses the closing entry and unlocks the period. Admin only.</div>' +
+      '<label class="form-label">Reason *</label><input class="form-control" id="reopenReason" placeholder="Why is this period being reopened?"></div>' +
+      '<div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>' +
+      '<button class="btn btn-danger" onclick="App._doReopenConfirmed(\''+period+'\')"><i class="bi bi-unlock me-1"></i>Reopen</button></div></div></div></div>';
+    _showModal(html);
+  }
+  function _doReopenConfirmed(period) {
+    var reason=(document.getElementById('reopenReason')||{}).value||'';
+    if(!reason){showToast('Reason required','warning');return;}
+    _hideModal();showLoading(true);
+    google.script.run.withSuccessHandler(function(r){
+      showLoading(false);showToast('Period '+r.period+' reopened','success');_loadPeriods();
+    }).withFailureHandler(function(e){showLoading(false);showToast(e.message,'danger');}).reopenPeriod({period:period,reason:reason});
+  }
+
+  // ── Validate books ──
+  function validateBooks() {
+    showLoading(true);
+    google.script.run.withSuccessHandler(function(res){
+      showLoading(false);
+      var rows=res.checks.map(function(ch){
+        return '<div class="d-flex align-items-center mb-2"><i class="bi bi-'+(ch.passed?'check-circle-fill text-success':'x-circle-fill text-danger')+' me-2"></i>' +
+          '<div><div class="fw-bold">'+_esc(ch.name)+'</div><div class="small text-muted">'+_esc(ch.detail)+'</div></div></div>';
+      }).join('');
+      var html='<div class="modal fade" id="crudModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">' +
+        '<div class="modal-header"><h5><i class="bi bi-shield-'+(res.valid?'check text-success':'exclamation text-danger')+' me-2"></i>Books Validation</h5>' +
+        '<button class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body">' +
+        '<div class="alert '+(res.valid?'alert-success':'alert-danger')+'">'+(res.valid?'All integrity checks passed — your books are balanced.':'One or more checks failed. See details below.')+'</div>' +
+        rows+'</div><div class="modal-footer"><button class="btn btn-primary" data-bs-dismiss="modal">Close</button></div></div></div></div>';
+      _showModal(html);
+    }).withFailureHandler(function(e){showLoading(false);showToast(e.message,'danger');}).validateBooks();
+  }
+
+  // ── Manual Journal Entry modal ──
+  function showJournalModal() {
+    _callModule('accounts','list',{sort:'account_code',order:'asc'},function(r){
+      var accounts=(_data(r)).filter(function(a){return a.is_active;});
+      _journalAccounts=accounts;
+      var today=new Date().toISOString().split('T')[0];
+      var html='<div class="modal fade" id="crudModal" tabindex="-1"><div class="modal-dialog modal-lg"><div class="modal-content">' +
+        '<div class="modal-header"><h5><i class="bi bi-journal-plus me-2"></i>New Journal Entry</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>' +
+        '<div class="modal-body"><div class="row g-3 mb-3">' +
+        '<div class="col-md-4"><label class="form-label">Date *</label><input type="date" class="form-control" id="je_date" value="'+today+'"></div>' +
+        '<div class="col-md-8"><label class="form-label">Description *</label><input class="form-control" id="je_desc" placeholder="e.g. Accrual for office rent"></div>' +
+        '</div><table class="table table-sm" id="je_lines"><thead><tr><th>Account</th><th class="text-end">Debit</th><th class="text-end">Credit</th><th></th></tr></thead><tbody></tbody></table>' +
+        '<button class="btn btn-sm btn-outline-secondary" onclick="App._addJournalLine()"><i class="bi bi-plus-lg me-1"></i>Add Line</button>' +
+        '<div class="d-flex justify-content-end mt-2 gap-4"><span>Debits: <strong id="je_totDr">0.00</strong></span><span>Credits: <strong id="je_totCr">0.00</strong></span>' +
+        '<span id="je_balance" class="badge bg-secondary">—</span></div>' +
+        '</div><div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>' +
+        '<button class="btn btn-primary" id="je_post" onclick="App.saveJournal()"><i class="bi bi-check-lg me-1"></i>Post Entry</button></div></div></div></div>';
+      _showModal(html);
+      _addJournalLine();_addJournalLine();
+    });
+  }
+  function _journalAccountOptions() {
+    return '<option value="">— select —</option>' + _journalAccounts.map(function(a){
+      return '<option value="'+a.account_code+'">'+_esc(a.account_code)+' · '+_esc(a.account_name)+'</option>';
+    }).join('');
+  }
+  function _addJournalLine() {
+    var tbody=document.querySelector('#je_lines tbody');
+    var tr=document.createElement('tr');
+    tr.innerHTML='<td><select class="form-select form-select-sm je-acct">'+_journalAccountOptions()+'</select></td>' +
+      '<td><input type="number" step="0.01" class="form-control form-control-sm text-end je-dr" oninput="App._recalcJournal()" placeholder="0.00"></td>' +
+      '<td><input type="number" step="0.01" class="form-control form-control-sm text-end je-cr" oninput="App._recalcJournal()" placeholder="0.00"></td>' +
+      '<td><button class="btn btn-sm btn-link text-danger" onclick="this.closest(\'tr\').remove();App._recalcJournal()"><i class="bi bi-trash"></i></button></td>';
+    tbody.appendChild(tr);
+  }
+  function _recalcJournal() {
+    var dr=0,cr=0;
+    document.querySelectorAll('#je_lines .je-dr').forEach(function(i){dr+=parseFloat(i.value)||0;});
+    document.querySelectorAll('#je_lines .je-cr').forEach(function(i){cr+=parseFloat(i.value)||0;});
+    document.getElementById('je_totDr').textContent=dr.toFixed(2);
+    document.getElementById('je_totCr').textContent=cr.toFixed(2);
+    var bal=Math.abs(dr-cr)<0.005 && dr>0;
+    var badge=document.getElementById('je_balance');
+    badge.className='badge '+(bal?'bg-success':'bg-danger');
+    badge.textContent=bal?'Balanced':'Out by '+Math.abs(dr-cr).toFixed(2);
+    document.getElementById('je_post').disabled=!bal;
+  }
+  function saveJournal() {
+    var date=document.getElementById('je_date').value;
+    var desc=document.getElementById('je_desc').value;
+    if(!desc){showToast('Description required','warning');return;}
+    var lines=[];
+    document.querySelectorAll('#je_lines tbody tr').forEach(function(tr){
+      var code=tr.querySelector('.je-acct').value;
+      var dr=parseFloat(tr.querySelector('.je-dr').value)||0;
+      var cr=parseFloat(tr.querySelector('.je-cr').value)||0;
+      if(code && (dr>0||cr>0)) lines.push({accountCode:code,debit:dr,credit:cr});
+    });
+    if(lines.length<2){showToast('At least two lines required','warning');return;}
+    showLoading(true);
+    google.script.run.withSuccessHandler(function(r){
+      showLoading(false);_hideModal();
+      showToast('Journal posted: '+r.entryNumber,'success');
+      _loadAccTab('journal');
+    }).withFailureHandler(function(e){showLoading(false);showToast(e.message,'danger');}).postManualJournal({date:date,description:desc,lines:lines});
+  }
+
+  // ── Chart of Accounts modal ──
+  function showAccountModal() {
+    var types=['Asset','Liability','Equity','Revenue','COGS','Expense'];
+    var html='<div class="modal fade" id="crudModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">' +
+      '<div class="modal-header"><h5><i class="bi bi-plus-circle me-2"></i>New Account</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>' +
+      '<div class="modal-body"><div class="row g-3">' +
+      '<div class="col-md-4"><label class="form-label">Code *</label><input class="form-control" id="ac_code" placeholder="e.g. 6960"></div>' +
+      '<div class="col-md-8"><label class="form-label">Name *</label><input class="form-control" id="ac_name"></div>' +
+      '<div class="col-md-6"><label class="form-label">Type *</label><select class="form-select" id="ac_type">'+types.map(function(t){return '<option>'+t+'</option>';}).join('')+'</select></div>' +
+      '<div class="col-md-6"><label class="form-label">Parent Code</label><input class="form-control" id="ac_parent" placeholder="optional"></div>' +
+      '<div class="col-12"><label class="form-label">Description</label><input class="form-control" id="ac_desc"></div>' +
+      '</div></div><div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>' +
+      '<button class="btn btn-primary" onclick="App.saveAccount()"><i class="bi bi-check-lg me-1"></i>Save</button></div></div></div></div>';
+    _showModal(html);
+  }
+  function saveAccount() {
+    var data={account_code:document.getElementById('ac_code').value,account_name:document.getElementById('ac_name').value,
+      account_type:document.getElementById('ac_type').value,parent_code:document.getElementById('ac_parent').value,
+      description:document.getElementById('ac_desc').value};
+    if(!data.account_code||!data.account_name){showToast('Code and name required','warning');return;}
+    showLoading(true);
+    _callModule('accounts','create',data,function(){
+      showLoading(false);_hideModal();showToast('Account created','success');_loadAccTab('coa');
+    },function(e){showLoading(false);showToast(e.message,'danger');});
+  }
+
+  // ============================================================
+  // MODAL HELPERS
+  // ============================================================
+  function _showModal(html) {
+    // Remove existing modal
+    var existing=document.getElementById('crudModal');
+    if(existing) existing.remove();
+    var backdrop=document.querySelector('.modal-backdrop');
+    if(backdrop) backdrop.remove();
+    document.body.insertAdjacentHTML('beforeend', html);
+    var modal=new bootstrap.Modal(document.getElementById('crudModal'));
+    modal.show();
+  }
+  function _hideModal() {
+    var el=document.getElementById('crudModal');
+    if(el){
+      // Bootstrap sets aria-hidden="true" on the modal as it starts to hide.
+      // If the element that triggered hide() (e.g. the Save button) still has
+      // focus and lives inside the modal, the browser blocks aria-hidden and
+      // logs "Blocked aria-hidden on an element because its descendant
+      // retained focus" — harmless on its own, but a sign focus wasn't moved
+      // out of the modal first. Blur whatever's focused inside it before
+      // hiding so the modal can close cleanly.
+      var active=document.activeElement;
+      if(active && el.contains(active)) active.blur();
+      var m=bootstrap.Modal.getInstance(el);if(m)m.hide();
+    }
+  }
+
+  // ============================================================
+  // TABLE FILTER
+  // ============================================================
+  function _filterTable(input) {
+    var val=input.value.toLowerCase();
+    var table=document.getElementById('dataTable');
+    if(!table) return;
+    var rows=table.querySelectorAll('tbody tr');
+    rows.forEach(function(row){
+      row.style.display=row.textContent.toLowerCase().indexOf(val)===-1?'none':'';
+    });
+  }
+
+  // ============================================================
+  // DASHBOARD (carried from Phase 1)
+  // ============================================================
+  function _renderDashboard(container) {
+    container.innerHTML = _getDashboardHTML();
+    _loadDashboardData('month');
+  }
+  function _getDashboardHTML() {
+    return '<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">' +
+      '<div><h5 class="mb-0">Welcome back, '+(_user?_user.name:'User')+'</h5><small class="text-muted">Here\'s your business overview</small></div>' +
+      '<div class="period-selector btn-group" role="group">' +
+      '<button class="btn btn-outline-secondary active" data-period="month" onclick="App.changePeriod(\'month\')">This Month</button>' +
+      '<button class="btn btn-outline-secondary" data-period="quarter" onclick="App.changePeriod(\'quarter\')">Quarter</button>' +
+      '<button class="btn btn-outline-secondary" data-period="year" onclick="App.changePeriod(\'year\')">Year</button></div></div>' +
+      '<div class="row g-3 mb-4" id="kpiRow">'+_kpiPlaceholders(8)+'</div>' +
+      '<div class="row g-3 mb-4"><div class="col-lg-8"><div class="card"><div class="card-header">Revenue vs Expenses</div>' +
+      '<div class="chart-container"><canvas id="chartRevenueExpenses"></canvas></div></div></div>' +
+      '<div class="col-lg-4"><div class="card"><div class="card-header">Invoice Status</div>' +
+      '<div class="chart-container"><canvas id="chartInvoiceStatus"></canvas></div></div></div></div>' +
+      '<div class="row g-3 mb-4"><div class="col-lg-5"><div class="card"><div class="card-header">Top Expense Categories</div>' +
+      '<div class="chart-container"><canvas id="chartExpenseCategories"></canvas></div></div></div>' +
+      '<div class="col-lg-7"><div class="card"><div class="card-header">Alerts &amp; Notifications</div>' +
+      '<div class="card-body p-0" id="alertsList"><div class="p-3 text-muted text-center">Loading alerts...</div></div></div></div></div>' +
+      '<div class="row g-3 mb-4" id="operationalKpis"></div>';
+  }
+  function _kpiPlaceholders(c){var h='';for(var i=0;i<c;i++)h+='<div class="col-6 col-md-4 col-xl-3"><div class="kpi-card"><div class="kpi-label">Loading...</div><div class="kpi-value">-</div></div></div>';return h;}
+  function changePeriod(p){document.querySelectorAll('.period-selector .btn').forEach(function(b){b.classList.remove('active');if(b.getAttribute('data-period')===p)b.classList.add('active');});_loadDashboardData(p);}
+  function _loadDashboardData(period){
+    google.script.run.withSuccessHandler(function(data){
+      _dashboardData=data;_renderKPIs(data);_renderCharts(data);_renderAlerts(data.alerts||[]);_renderOperationalKPIs(data);
+    }).withFailureHandler(function(e){showToast('Dashboard error: '+e.message,'danger');}).getDashboardData(period);
+  }
+  function _renderKPIs(data){
+    var f=data.financial||{};var sym=_config.currencySymbol||'GH₵';
+    var kpis=[
+      {label:'Revenue',value:_fmtMoney(f.revenue,sym),color:'success'},{label:'Expenses',value:_fmtMoney(f.expenses,sym),color:'danger'},
+      {label:'Gross Profit',value:_fmtMoney(f.grossProfit,sym),color:f.grossProfit>=0?'success':'danger'},
+      {label:'Net Profit',value:_fmtMoney(f.netProfit,sym),color:f.netProfit>=0?'success':'danger'},
+      {label:'Cash Position',value:_fmtMoney(f.cashPosition,sym),color:'info'},{label:'Receivables',value:_fmtMoney(f.accountsReceivable,sym),color:'warning'},
+      {label:'Payables',value:_fmtMoney(f.accountsPayable,sym),color:'warning'},{label:'Gross Margin',value:(f.grossMargin||0)+'%',color:'info'}
+    ];
+    var html='';kpis.forEach(function(k){
+      html+='<div class="col-6 col-md-4 col-xl-3"><div class="kpi-card '+k.color+'"><div class="kpi-label">'+k.label+'</div><div class="kpi-value">'+k.value+'</div></div></div>';
+    });
+    document.getElementById('kpiRow').innerHTML=html;
+  }
+  function _renderCharts(data){
+    var charts=data.charts||{};
+    // Revenue vs Expenses bar chart
+    _destroyChart('chartRevenueExpenses');
+    var rv=charts.revenueVsExpenses||{labels:[],revenue:[],expenses:[]};
+    var ctx1=document.getElementById('chartRevenueExpenses');
+    if(ctx1)_charts.chartRevenueExpenses=new Chart(ctx1,{type:'bar',data:{labels:rv.labels,datasets:[
+      {label:'Revenue',data:rv.revenue,backgroundColor:'rgba(52,168,83,0.7)'},{label:'Expenses',data:rv.expenses,backgroundColor:'rgba(234,67,53,0.7)'}
+    ]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'bottom'}},scales:{y:{beginAtZero:true}}}});
+    // Invoice status doughnut
+    _destroyChart('chartInvoiceStatus');
+    var is=charts.invoiceStatusBreakdown||{labels:[],values:[],colors:[]};
+    var ctx2=document.getElementById('chartInvoiceStatus');
+    if(ctx2)_charts.chartInvoiceStatus=new Chart(ctx2,{type:'doughnut',data:{labels:is.labels,datasets:[{data:is.values,backgroundColor:is.colors||['#34a853','#1a73e8','#fbbc04','#ea4335','#9aa0a6']}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'bottom'}}}});
+    // Expense categories
+    _destroyChart('chartExpenseCategories');
+    var ec=charts.topExpenseCategories||{labels:[],values:[]};
+    var ctx3=document.getElementById('chartExpenseCategories');
+    if(ctx3)_charts.chartExpenseCategories=new Chart(ctx3,{type:'bar',data:{labels:ec.labels,datasets:[{label:'Amount',data:ec.values,backgroundColor:'rgba(66,133,244,0.7)'}]},options:{responsive:true,maintainAspectRatio:false,indexAxis:'y',plugins:{legend:{display:false}},scales:{x:{beginAtZero:true}}}});
+  }
+  function _destroyChart(id){if(_charts[id]){_charts[id].destroy();delete _charts[id];}}
+  function _renderAlerts(alerts){
+    var el=document.getElementById('alertsList');if(!el)return;
+    if(!alerts.length){el.innerHTML='<div class="p-3 text-muted text-center">No alerts</div>';return;}
+    var html='<div class="p-3">';
+    alerts.forEach(function(a){
+      var icon=a.type==='danger'?'exclamation-triangle':a.type==='warning'?'exclamation-circle':'info-circle';
+      html+='<div class="alert-item"><div class="alert-icon '+(a.type||'info')+'"><i class="bi bi-'+icon+'"></i></div><div><div>'+_esc(a.message)+'</div></div></div>';
+    });
+    el.innerHTML=html+'</div>';
+  }
+  function _renderOperationalKPIs(data){
+    var inv=data.inventory||{};var pay=data.payroll||{};var sym=_config.currencySymbol||'GH₵';
+    var kpis=[
+      {label:'Inventory Value',value:_fmtMoney(inv.inventoryValue,sym),color:'info'},
+      {label:'Low Stock Items',value:inv.lowStockItems||0,color:'warning'},
+      {label:'Out of Stock',value:inv.outOfStockItems||0,color:'danger'},
+      {label:'Employees',value:pay.employeeCount||0,color:'info'}
+    ];
+    var html='';kpis.forEach(function(k){
+      html+='<div class="col-6 col-md-3"><div class="kpi-card '+k.color+'"><div class="kpi-label">'+k.label+'</div><div class="kpi-value">'+k.value+'</div></div></div>';
+    });
+    var el=document.getElementById('operationalKpis');if(el)el.innerHTML=html;
+  }
+
+  // ============================================================
+  // SETTINGS & USERS (from Phase 1)
+  // ============================================================
+  function _renderSettings(container) {
+    container.innerHTML='<div class="module-loading"><div class="spinner-border text-primary"></div></div>';
+    google.script.run.withSuccessHandler(function(settings){
+      var keys=Object.keys(settings);
+      var html='<div class="card"><div class="card-header"><span>Application Settings</span></div><div class="card-body"><div class="row g-3">';
+      keys.forEach(function(k){
+        var lbl=k.replace(/_/g,' ').replace(/\b\w/g,function(l){return l.toUpperCase();});
+        html+='<div class="col-md-6"><label class="form-label fw-semibold">'+lbl+'</label><input type="text" class="form-control" data-key="'+k+'" value="'+_escAttr(settings[k])+'"></div>';
+      });
+      html+='</div><div class="mt-3"><button class="btn btn-primary" onclick="App.saveSettings()"><i class="bi bi-check-lg me-1"></i>Save</button></div></div></div>';
+      container.innerHTML=html;
+    }).withFailureHandler(function(e){container.innerHTML='<div class="alert alert-danger">'+e.message+'</div>';}).getSettings();
+  }
+  function saveSettings(){
+    var inputs=document.querySelectorAll('[data-key]');var pending=inputs.length;var errors=0;
+    inputs.forEach(function(inp){
+      google.script.run.withSuccessHandler(function(){pending--;if(!pending)showToast(errors?'Saved with errors':'Settings saved',errors?'warning':'success');})
+        .withFailureHandler(function(){errors++;pending--;if(!pending)showToast('Some settings failed','danger');}).updateSetting(inp.getAttribute('data-key'),inp.value);
+    });
+  }
+  function _renderUsers(container) {
+    if(!_user||_user.role!=='Administrator'){container.innerHTML='<div class="alert alert-warning">Administrator access required.</div>';return;}
+    container.innerHTML='<div class="module-loading"><div class="spinner-border text-primary"></div></div>';
+    google.script.run.withSuccessHandler(function(result){
+      var users=_data(result);
+      var html='<div class="card"><div class="card-header"><span>Users</span></div><div class="table-container"><table class="table table-hover"><thead><tr>' +
+        '<th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Last Login</th></tr></thead><tbody>';
+      users.forEach(function(u){
+        html+='<tr><td>'+_esc(u.name)+'</td><td>'+_esc(u.email)+'</td><td>'+_esc(u.role)+'</td>' +
+          '<td>'+_badge(u.status)+'</td><td>'+(u.last_login?new Date(u.last_login).toLocaleDateString():'-')+'</td></tr>';
+      });
+      html+='</tbody></table></div></div>';
+      container.innerHTML=html;
+    }).withFailureHandler(function(e){container.innerHTML='<div class="alert alert-danger">'+e.message+'</div>';}).moduleAction('users','list',{});
+  }
+
+  function initDatabase() {
+    // Use an in-app modal because browser confirm() is blocked in Apps Script sandbox
+    var html = '<div class="modal fade" id="crudModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">' +
+      '<div class="modal-header"><h5 class="modal-title"><i class="bi bi-database-gear me-2"></i>Initialize Database</h5>' +
+      '<button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>' +
+      '<div class="modal-body">' +
+      '<div class="alert alert-info mb-3"><i class="bi bi-info-circle me-2"></i>' +
+      '<strong>Safe to run at any time.</strong> Creates missing sheets, adds missing columns, seeds default data. ' +
+      'Existing data is never overwritten or deleted.</div>' +
+      '<p class="text-muted mb-0">This will also repair any sheets missing their header row.</p>' +
+      '</div>' +
+      '<div class="modal-footer">' +
+      '<button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>' +
+      '<button class="btn btn-primary" onclick="App._runInitDatabase()">' +
+      '<i class="bi bi-play-fill me-1"></i>Run Initialization</button>' +
+      '</div></div></div></div>';
+    _showModal(html);
+  }
+
+  /**
+   * Show exactly which spreadsheet this deployment is connected to.
+   *
+   * Apps Script web apps resolve their database server-side and silently
+   * auto-create a brand new spreadsheet if that resolution ever comes up
+   * empty (a redeploy, a copied script, a reset property). When that
+   * happens, the app keeps working — it just reads and writes a DIFFERENT
+   * file than whichever one a person has open in their browser, producing
+   * confusing symptoms like "this record already exists" for something they
+   * can't find, or a Users list that looks empty despite a user clearly
+   * being in their sheet. This shows the live spreadsheet name, URL, and a
+   * couple of row counts to check against.
+   */
+  function _buildVersionBanner(serverVersion) {
+    var sv = serverVersion || 'unknown';
+    var match = (sv === BUILD_TAG);
+    if (match) {
+      return '<div class="alert alert-success py-2 small mb-3"><i class="bi bi-check-circle me-1"></i>' +
+        'Server and browser are running the same build (<code>' + _esc(sv) + '</code>). ' +
+        'The deployed code is current.</div>';
+    }
+    return '<div class="alert alert-danger py-2 small mb-3"><i class="bi bi-exclamation-triangle me-1"></i>' +
+      '<strong>Build mismatch — the browser is running OLD code.</strong><br>' +
+      'Server code: <code>' + _esc(sv) + '</code> &nbsp; vs &nbsp; Browser bundle: <code>' + _esc(BUILD_TAG) + '</code><br>' +
+      'This means a new deployment version was not published, or your browser cached an old page. ' +
+      'Fix: in the Apps Script editor, <strong>Deploy → Manage deployments → edit → Version: New version → Deploy</strong>, ' +
+      'then hard-reload this page (Ctrl+Shift+R).</div>';
+  }
+
+  function showDatabaseInfo() {
+    showLoading(true);
+    google.script.run.withSuccessHandler(function(info) {
+      showLoading(false);
+      var html = '<div class="modal fade" id="crudModal" tabindex="-1"><div class="modal-dialog modal-lg"><div class="modal-content">' +
+        '<div class="modal-header"><h5 class="modal-title"><i class="bi bi-database-check me-2"></i>Database Info</h5>' +
+        '<button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>' +
+        '<div class="modal-body">' +
+        '<div class="alert alert-info py-2 small mb-3"><i class="bi bi-info-circle me-1"></i>' +
+        'The app reads and writes to the spreadsheet shown below. ' +
+        'If this URL does not match the sheet you have open, your data is in a different file. ' +
+        'Use <strong>Set Spreadsheet ID</strong> below to fix this without redeploying.</div>' +
+        _buildVersionBanner(info.serverVersion) +
+        '<div class="mb-3"><label class="form-label small text-muted mb-1">Active spreadsheet</label>' +
+        '<div class="fw-bold">' + _esc(info.name) + '</div>' +
+        '<div class="small text-muted">Resolved via: <span class="badge bg-secondary">' + _esc(info.resolutionMode || 'unknown') + '</span></div>' +
+        '<div class="small"><a href="' + info.url + '" target="_blank">' + _esc(info.url) + ' <i class="bi bi-box-arrow-up-right"></i></a></div></div>' +
+        '<div class="row g-2 mb-3">' +
+        '<div class="col-6"><div class="kpi-card info"><div class="kpi-label">Users</div><div class="kpi-value">' + (info.rowCounts.Users===null||info.rowCounts.Users===undefined?'—':info.rowCounts.Users) + '</div></div></div>' +
+        '<div class="col-6"><div class="kpi-card info"><div class="kpi-label">Customers</div><div class="kpi-value">' + (info.rowCounts.Customers===null||info.rowCounts.Customers===undefined?'—':info.rowCounts.Customers) + '</div></div></div>' +
+        '</div>' +
+        '<hr>' +
+        '<div class="mb-2"><label class="form-label">Change spreadsheet (takes effect immediately, no redeploy needed)</label>' +
+        '<div class="input-group">' +
+        '<input class="form-control form-control-sm font-monospace" id="newSsId" placeholder="Paste spreadsheet ID here...">' +
+        '<button class="btn btn-sm btn-warning" onclick="App._setSpreadsheet()"><i class="bi bi-arrow-repeat me-1"></i>Set & Switch</button>' +
+        '</div><div class="form-text">The spreadsheet ID is the long string between /d/ and /edit in the URL.</div></div>' +
+        '</div>' +
+        '<div class="modal-footer">' +
+        '<button class="btn btn-outline-info btn-sm" onclick="App._runSelfTest()"><i class="bi bi-clipboard-check me-1"></i>Run Self-Test</button>' +
+        '<button class="btn btn-outline-secondary btn-sm" onclick="App._clearCaches()"><i class="bi bi-trash me-1"></i>Clear Caches</button>' +
+        '<button class="btn btn-secondary" data-bs-dismiss="modal">Close</button>' +
+        '<a class="btn btn-primary" href="' + info.url + '" target="_blank"><i class="bi bi-box-arrow-up-right me-1"></i>Open Spreadsheet</a>' +
+        '</div></div></div></div>';
+      _showModal(html);
+    }).withFailureHandler(function(e) { showLoading(false); showToast(e.message, 'danger'); }).getDatabaseInfo();
+  }
+
+  function _setSpreadsheet() {
+    var id = (document.getElementById('newSsId').value || '').trim();
+    if (!id) { showToast('Paste a spreadsheet ID first', 'warning'); return; }
+    showLoading(true);
+    google.script.run
+      .withSuccessHandler(function(r) {
+        showLoading(false); _hideModal();
+        showToast('Switched to "' + r.name + '". Reload the page to see your data.', 'success');
+      })
+      .withFailureHandler(function(e) { showLoading(false); showToast(e.message, 'danger'); })
+      .setDatabaseSpreadsheet({ spreadsheetId: id });
+  }
+
+  function _clearCaches() {
+    showLoading(true);
+    google.script.run
+      .withSuccessHandler(function() { showLoading(false); showToast('Caches cleared', 'success'); })
+      .withFailureHandler(function(e) { showLoading(false); showToast(e.message, 'danger'); })
+      .clearAllCaches();
+  }
+
+  function _runSelfTest() {
+    showLoading(true);
+    google.script.run
+      .withSuccessHandler(function(report) {
+        showLoading(false);
+        var rows = (report.steps || []).map(function(s) {
+          var icon = s.ok ? '<span class="text-success">✓</span>' : '<span class="text-danger">✗</span>';
+          var detail = s.ok
+            ? '<code class="small">' + _esc(typeof s.detail === 'object' ? JSON.stringify(s.detail) : String(s.detail)) + '</code>'
+            : '<span class="text-danger small">' + _esc(s.error || '') + '</span>';
+          return '<tr><td>' + icon + '</td><td class="small">' + _esc(s.step) + '</td><td>' + detail + '</td></tr>';
+        }).join('');
+        var banner = report.ok
+          ? '<div class="alert alert-success"><strong>PASS.</strong> ' + _esc(report.summary) + '</div>'
+          : '<div class="alert alert-danger"><strong>Problem found.</strong> ' + _esc(report.summary) + '</div>';
+        var html = '<div class="modal fade" id="crudModal" tabindex="-1"><div class="modal-dialog modal-lg"><div class="modal-content">' +
+          '<div class="modal-header"><h5 class="modal-title"><i class="bi bi-clipboard-check me-2"></i>Self-Test Report</h5>' +
+          '<button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>' +
+          '<div class="modal-body">' + banner +
+          '<div class="table-container"><table class="table table-sm"><thead><tr><th></th><th>Step</th><th>Detail</th></tr></thead><tbody>' +
+          rows + '</tbody></table></div></div>' +
+          '<div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Close</button></div>' +
+          '</div></div></div>';
+        _showModal(html);
+      })
+      .withFailureHandler(function(e) { showLoading(false); showToast(e.message, 'danger'); })
+      .runSelfTest();
+  }
+
+  function _runInitDatabase() {
+    _hideModal();
+    showLoading(true);
+    google.script.run
+      .withSuccessHandler(function(r) {
+        showLoading(false);
+        // Show detailed results in a modal
+        var det = r.details || {};
+        var rows = [
+          {label: 'Sheets Created',   items: det.created   || [], color: 'success'},
+          {label: 'Sheets Validated', items: det.validated || [], color: 'info'},
+          {label: 'Sheets Repaired',  items: det.repaired  || [], color: 'warning'},
+          {label: 'Data Seeded',      items: det.seeded    || [], color: 'primary'},
+          {label: 'Errors',           items: det.errors    || [], color: 'danger'}
+        ].filter(function(row) { return row.items.length > 0; });
+
+        var body = rows.length
+          ? rows.map(function(row) {
+              return '<div class="mb-2"><span class="badge bg-' + row.color + ' me-2">' + row.label + '</span>' +
+                '<small>' + row.items.map(function(i){ return _esc(i); }).join(', ') + '</small></div>';
+            }).join('')
+          : '<p class="text-muted">All sheets already up to date.</p>';
+
+        var html2 = '<div class="modal fade" id="crudModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">' +
+          '<div class="modal-header"><h5><i class="bi bi-check-circle-fill text-success me-2"></i>Database Initialized</h5>' +
+          '<button class="btn-close" data-bs-dismiss="modal"></button></div>' +
+          '<div class="modal-body">' + body + '</div>' +
+          '<div class="modal-footer"><button class="btn btn-primary" data-bs-dismiss="modal" ' +
+          'onclick="App.navigate(\'dashboard\')">Continue to Dashboard</button></div>' +
+          '</div></div></div>';
+        _showModal(html2);
+      })
+      .withFailureHandler(function(e) {
+        showLoading(false);
+        showToast('Initialization error: ' + e.message, 'danger');
+      })
+      .initializeDatabase();
+  }
+
+
+  // ============================================================
+  // INVENTORY HUB
+  // ============================================================
+  function _renderInventoryHub(c) {
+    google.script.run.withSuccessHandler(function(kpis) {
+      var sym = _config.currencySymbol || 'GH₵';
+      var inv = kpis.inventory || {};
+      var kpiHtml = [
+        {l:'Total Products', v: inv.totalProducts||0, col:'info'},
+        {l:'Inventory Value', v: _fmtMoney(inv.inventoryValue||0,sym), col:'success'},
+        {l:'Low Stock', v: inv.lowStockItems||0, col:'warning'},
+        {l:'Out of Stock', v: inv.outOfStockItems||0, col:'danger'}
+      ].map(function(k){
+        return '<div class="col-6 col-md-3"><div class="kpi-card '+k.col+'"><div class="kpi-label">'+k.l+'</div><div class="kpi-value">'+k.v+'</div></div></div>';
+      }).join('');
+
+      var cards = [
+        {m:'products', i:'box-seam', t:'Products', d:'Manage stock items & SKUs'},
+        {m:'categories', i:'tags', t:'Categories', d:'Organise product groups'},
+        {m:'suppliers', i:'truck', t:'Suppliers', d:'Manage supplier records'},
+        {m:'inv-txns', i:'arrow-left-right', t:'Transactions', d:'Full stock movement log'},
+        {m:'inv-lowstock', i:'exclamation-triangle', t:'Low Stock', d:'Reorder alerts'},
+        {m:'inv-valuation', i:'currency-dollar', t:'Valuation Report', d:'Stock value by method'}
+      ].map(function(x){
+        return '<div class="inv-hub-card" onclick="App.navigate(\''+ x.m +'\')">' +
+          '<i class="bi bi-'+ x.i +'"></i><h6>'+x.t+'</h6><p>'+x.d+'</p></div>';
+      }).join('');
+
+      c.innerHTML = '<div class="row g-3 mb-4">'+kpiHtml+'</div>' +
+        '<div class="inv-hub-cards">'+cards+'</div>';
+    }).withFailureHandler(function() {
+      c.innerHTML = '<div class="inv-hub-cards">' + [
+        {m:'products',i:'box-seam',t:'Products',d:'Manage stock items'},{m:'categories',i:'tags',t:'Categories',d:'Product groups'},
+        {m:'suppliers',i:'truck',t:'Suppliers',d:'Supplier records'},{m:'inv-txns',i:'arrow-left-right',t:'Transactions',d:'Movement log'},
+        {m:'inv-lowstock',i:'exclamation-triangle',t:'Low Stock',d:'Reorder alerts'},{m:'inv-valuation',i:'currency-dollar',t:'Valuation',d:'Stock value'}
+      ].map(function(x){ return '<div class="inv-hub-card" onclick="App.navigate(\''+ x.m +'\')">' +
+        '<i class="bi bi-'+ x.i +'"></i><h6>'+x.t+'</h6><p>'+x.d+'</p></div>'; }).join('') + '</div>';
+    }).getDashboardData('month');
+  }
+
+  // ============================================================
+  // PRODUCTS
+  // ============================================================
+  function _renderProducts(c, params) {
+    if (params && params.view) { _renderProductDetail(c, params.view); return; }
+    _loading(c);
+    _callModule('products','list',{sort:'name',order:'asc'},function(result) {
+      var rows = _data(result);
+      var html = '<div class="module-toolbar">' +
+        '<div class="search-box"><i class="bi bi-search"></i><input class="form-control" placeholder="Search products..." oninput="App._filterTable(this)"></div>' +
+        '<div class="d-flex gap-2">' +
+        '<button class="btn btn-outline-secondary" onclick="App.navigate(\'inv-valuation\')"><i class="bi bi-bar-chart me-1"></i>Valuation</button>' +
+        '<button class="btn btn-primary" onclick="App.showProductModal()"><i class="bi bi-plus-lg me-1"></i>New Product</button></div></div>' +
+        '<div class="card"><div class="table-container"><table class="table table-hover" id="dataTable"><thead><tr>' +
+        '<th>SKU</th><th>Name</th><th>Category</th><th class="text-end">Cost</th><th class="text-end">Price</th><th class="text-end">Stock</th><th>Valuation</th><th>Status</th></tr></thead><tbody>';
+      rows.forEach(function(r) {
+        if (r.status === 'Inactive') return;
+        var qty = parseFloat(r.quantity_on_hand)||0;
+        var reorder = parseFloat(r.reorder_level)||0;
+        var stockStatus = qty <= 0 ? 'out_of_stock' : (qty <= reorder ? 'low' : 'ok');
+        var vm = (r.valuation_method||'wa').toLowerCase() === 'fifo' ? 'fifo' : 'wa';
+        var qtyClass = qty <= 0 ? 'qty-negative' : (qty <= reorder ? 'qty-negative' : 'qty-positive');
+        html += '<tr onclick="App.navigate(\'products\',{view:\''+ r.product_id +'\'})">'  +
+          '<td><code>'+_esc(r.sku)+'</code></td><td>'+_esc(r.name)+'</td><td>'+_esc(r.category||'—')+'</td>' +
+          '<td class="text-end">'+_fmtMoney(r.cost_price)+'</td>' +
+          '<td class="text-end">'+_fmtMoney(r.unit_price)+'</td>' +
+          '<td class="text-end"><span class="'+qtyClass+'">'+qty+'</span> <small class="text-muted">'+_esc(r.unit||'')+'</small></td>' +
+          '<td><span class="valuation-badge '+ vm +"'>" + (vm === 'fifo' ? 'FIFO' : 'W.Avg') + '</span></td>' +
+          '<td>'+_badge(stockStatus.replace(/_/g,' '))+'</td></tr>';
+      });
+      if (!rows.length) html += '<tr><td colspan="8" class="empty-state"><i class="bi bi-box-seam"></i>No products yet</td></tr>';
+      html += '</tbody></table></div></div>';
+      c.innerHTML = html;
+    });
+  }
+
+  function _renderProductDetail(c, id) {
+    _loading(c);
+    _callModule('products','get',{id:id},function(prod) {
+      var qty = parseFloat(prod.quantity_on_hand)||0;
+      var reorder = parseFloat(prod.reorder_level)||0;
+      var stockStatus = qty <= 0 ? 'out_of_stock' : (qty <= reorder ? 'low' : 'ok');
+      var pct = reorder > 0 ? Math.min(100, Math.round(qty/reorder*100)) : (qty > 0 ? 100 : 0);
+      var barCls = qty <= 0 ? 'critical' : (qty <= reorder ? 'low' : 'ok');
+
+      var html = '<a href="javascript:void(0)" class="text-decoration-none mb-3 d-inline-block" onclick="App.navigate(\'products\')"><i class="bi bi-arrow-left me-1"></i>Back to Products</a>' +
+        '<div class="detail-header"><div><h4>'+_esc(prod.name)+'</h4><p class="text-muted mb-0"><code>'+_esc(prod.sku)+'</code> &middot; '+_esc(prod.category||'Uncategorised')+'</p></div>' +
+        '<div class="action-btn-group">' +
+        '<button class="btn btn-outline-primary" onclick="App.showProductModal('+JSON.stringify({product_id:prod.product_id,name:prod.name,sku:prod.sku,category:prod.category,unit:prod.unit,unit_price:prod.unit_price,cost_price:prod.cost_price,reorder_level:prod.reorder_level,reorder_quantity:prod.reorder_quantity,valuation_method:prod.valuation_method,location:prod.location,notes:prod.description}).replace(/"/g,'&quot;')+')"><i class="bi bi-pencil me-1"></i>Edit</button>' +
+        '<button class="btn btn-success" onclick="App.showAdjustModal(\''+ id +'\',\''+ _escAttr(prod.name)+'\','+ qty +')"><i class="bi bi-plus-slash-minus me-1"></i>Adjust Stock</button>' +
+        '<button class="btn btn-warning" onclick="App.showDamageModal(\''+ id +'\',\''+ _escAttr(prod.name)+'\','+ qty +')"><i class="bi bi-exclamation-triangle me-1"></i>Record Damage</button>' +
+        '<button class="btn btn-outline-secondary" onclick="App.showTransferModal(\''+ id +'\',\''+ _escAttr(prod.name)+'\','+ qty +',\''+ _escAttr(prod.location||'')+'\')"><i class="bi bi-arrows-move me-1"></i>Transfer</button>' +
+        '</div></div>' +
+        '<div class="detail-meta mb-4">' +
+        '<div class="meta-item"><div class="meta-label">Stock Qty</div><div class="meta-value" style="color:'+( qty<=0?'var(--danger)':qty<=reorder?'var(--warning)':'var(--success)')+';">'+qty+'</div></div>' +
+        '<div class="meta-item"><div class="meta-label">Cost Price</div><div class="meta-value">'+_fmtMoney(prod.cost_price)+'</div></div>' +
+        '<div class="meta-item"><div class="meta-label">Unit Price</div><div class="meta-value">'+_fmtMoney(prod.unit_price)+'</div></div>' +
+        '<div class="meta-item"><div class="meta-label">Stock Value</div><div class="meta-value">'+_fmtMoney(qty*(parseFloat(prod.cost_price)||0))+'</div></div>' +
+        '<div class="meta-item"><div class="meta-label">Reorder At</div><div class="meta-value">'+reorder+'</div></div>' +
+        '<div class="meta-item"><div class="meta-label">Status</div><div>'+_badge(stockStatus.replace(/_/g,' '))+'</div></div>' +
+        '</div>' +
+        '<div class="card mb-3"><div class="card-body pb-1">' +
+        '<div class="d-flex justify-content-between mb-1 small"><span>Stock level vs reorder</span><span>'+qty+' / '+reorder+'</span></div>' +
+        '<div class="stock-level-bar"><div class="stock-level-fill '+ barCls +'" style="width:'+ pct +'%"></div></div></div></div>' +
+        '<div class="card"><div class="card-header"><span>Recent Transactions</span>' +
+        '<button class="btn btn-sm btn-outline-secondary" onclick="App.navigate(\'inv-txns\',{product_id:\''+ id +'\'})"><i class="bi bi-list-ul me-1"></i>All</button></div>' +
+        '<div class="table-container"><table class="table"><thead><tr><th>Date</th><th>Type</th><th class="text-end">Qty</th><th class="text-end">Unit Cost</th><th class="text-end">Running Qty</th><th>Ref</th></tr></thead><tbody>';
+
+      (prod.recentTransactions||[]).forEach(function(t) {
+        var q = parseFloat(t.quantity)||0;
+        var qClass = q > 0 ? 'qty-positive' : (q < 0 ? 'qty-negative' : 'qty-zero');
+        var txTypeLower = (t.type||'').toLowerCase().replace(/ /g,'_');
+        html += '<tr><td>'+_fmtDate(t.date)+'</td><td>'+_badge(txTypeLower)+'</td>' +
+          '<td class="text-end"><span class="'+ qClass +'">'+( q > 0 ? '+':'' )+q+'</span></td>' +
+          '<td class="text-end">'+_fmtMoney(t.unit_cost)+'</td>' +
+          '<td class="text-end">'+( parseFloat(t.running_qty)||'—' )+'</td>' +
+          '<td class="small text-muted">'+_esc(t.reference_type||'')+'</td></tr>';
+      });
+      if (!(prod.recentTransactions||[]).length) {
+        html += '<tr><td colspan="6" class="text-center text-muted py-3">No transactions yet</td></tr>';
+      }
+      html += '</tbody></table></div></div>';
+      c.innerHTML = html;
+    });
+  }
+
+  function showProductModal(existing) {
+    var d = existing || {};
+    _callModule('categories','list',{filters:{status:'Active'},sort:'name',order:'asc'},function(catResult){
+      var cats = _data(catResult);
+      var catOpts = '<option value="">— Select category —</option>' +
+        cats.map(function(cat){ return '<option value="'+ _escAttr(cat.name)+'"'+ (cat.name===d.category?' selected':'')+'>'+_esc(cat.name)+'</option>'; }).join('');
+      var isEdit = !!d.product_id;
+      var vmOpts = ['weighted_average','fifo'].map(function(m){
+        return '<option value="'+ m +'"'+ (m===(d.valuation_method||'weighted_average')?' selected':'')+'>'+( m==='fifo' ? 'FIFO' : 'Weighted Average')+'</option>';
+      }).join('');
+      var title = isEdit ? 'Edit Product' : 'New Product';
+      var html = '<div class="modal fade" id="crudModal" tabindex="-1"><div class="modal-dialog modal-lg"><div class="modal-content">' +
+        '<div class="modal-header"><h5 class="modal-title">'+title+'</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>' +
+        '<div class="modal-body"><div class="row g-3">' +
+        '<div class="col-md-8"><label class="form-label">Name *</label><input class="form-control" id="fp_name" value="'+_escAttr(d.name||'')+'"></div>' +
+        '<div class="col-md-4"><label class="form-label">SKU</label><input class="form-control" id="fp_sku" value="'+_escAttr(d.sku||'')+'"'+ (isEdit?' readonly':'')+'></div>' +
+        '<div class="col-md-6"><label class="form-label">Category *</label><select class="form-select" id="fp_cat">'+ catOpts +'</select></div>' +
+        '<div class="col-md-3"><label class="form-label">Unit</label><select class="form-select" id="fp_unit"><option>pcs</option><option>kg</option><option>litres</option><option>metres</option><option>boxes</option><option>cartons</option></select></div>' +
+        '<div class="col-md-3"><label class="form-label">Tax Rate %</label><input type="number" class="form-control" id="fp_tax" value="'+( d.tax_rate !== undefined ? d.tax_rate : (_config.taxRate||15))+'"></div>' +
+        '<div class="col-md-4"><label class="form-label">Cost Price (GH₵) *</label><input type="number" class="form-control" id="fp_cost" step="0.01" value="'+( d.cost_price||0 )+'"></div>' +
+        '<div class="col-md-4"><label class="form-label">Unit Price (GH₵) *</label><input type="number" class="form-control" id="fp_price" step="0.01" value="'+( d.unit_price||0 )+'"></div>' +
+        '<div class="col-md-4"><label class="form-label">Valuation Method</label><select class="form-select" id="fp_vm">'+ vmOpts +'</select></div>' +
+        ( !isEdit ?
+          '<div class="col-md-4"><label class="form-label">Opening Qty</label><input type="number" class="form-control" id="fp_openqty" value="0" min="0"></div>' : '' ) +
+        '<div class="col-md-4"><label class="form-label">Reorder Level</label><input type="number" class="form-control" id="fp_reorder" value="'+( d.reorder_level||10 )+'"></div>' +
+        '<div class="col-md-4"><label class="form-label">Reorder Qty</label><input type="number" class="form-control" id="fp_reorderqty" value="'+( d.reorder_quantity||0 )+'"></div>' +
+        '<div class="col-md-6"><label class="form-label">Location</label><input class="form-control" id="fp_loc" value="'+_escAttr(d.location||'')+'"></div>' +
+        '<div class="col-12"><label class="form-label">Description</label><textarea class="form-control" id="fp_desc" rows="2">'+_esc(d.notes||d.description||'')+'</textarea></div>' +
+        '</div></div><div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>' +
+        '<button class="btn btn-primary" onclick="App.saveProduct(\''+ _escAttr(d.product_id||'')+'\')"><i class="bi bi-check-lg me-1"></i>Save</button></div></div></div></div>';
+      _showModal(html);
+      // Set unit
+      var unitEl = document.getElementById('fp_unit');
+      if (unitEl && d.unit) { for(var i=0;i<unitEl.options.length;i++){ if(unitEl.options[i].value===d.unit) unitEl.selectedIndex=i; } }
+    });
+  }
+
+  function saveProduct(existingId) {
+    var cat = document.getElementById('fp_cat');
+    var data = {
+      name:             document.getElementById('fp_name').value,
+      sku:              document.getElementById('fp_sku').value,
+      category:         cat ? cat.value : '',
+      unit:             document.getElementById('fp_unit').value,
+      cost_price:       parseFloat(document.getElementById('fp_cost').value)||0,
+      unit_price:       parseFloat(document.getElementById('fp_price').value)||0,
+      tax_rate:         parseFloat(document.getElementById('fp_tax').value)||0,
+      valuation_method: document.getElementById('fp_vm').value,
+      reorder_level:    parseFloat(document.getElementById('fp_reorder').value)||0,
+      reorder_quantity: parseFloat(document.getElementById('fp_reorderqty').value)||0,
+      location:         document.getElementById('fp_loc').value,
+      description:      document.getElementById('fp_desc').value
+    };
+    var oqEl = document.getElementById('fp_openqty');
+    if (oqEl) data.quantity_on_hand = parseFloat(oqEl.value)||0;
+    if (existingId) data.product_id = existingId;
+    if (!data.name) { showToast('Product name required','warning'); return; }
+    showLoading(true);
+    _callModule('products', existingId ? 'update' : 'create', data, function(r) {
+      showLoading(false); _hideModal();
+      showToast('Product '+(existingId?'updated':'created')+'! SKU: '+(r.sku||'—'), 'success');
+      if (!existingId) navigate('products',{view:r.id});
+      else navigate('products',{view:existingId});
+    }, function(e){ showLoading(false); showToast(e.message,'danger'); });
+  }
+
+  // ============================================================
+  // STOCK ADJUSTMENT MODAL
+  // ============================================================
+  function showAdjustModal(productId, productName, currentQty) {
+    var html = '<div class="modal fade" id="crudModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">' +
+      '<div class="modal-header"><h5>Stock Adjustment</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>' +
+      '<div class="modal-body">' +
+      '<div class="alert alert-info mb-3"><i class="bi bi-info-circle me-2"></i>Current stock: <strong>'+ currentQty +'</strong> units</div>' +
+      '<div class="row g-3">' +
+      '<div class="col-12"><label class="form-label">Adjustment Type</label><select class="form-select" id="adj_type">' +
+        '<option value="count">Set to physical count</option>' +
+        '<option value="add">Add stock (+)</option>' +
+        '<option value="remove">Remove stock (−)</option>' +
+      '</select></div>' +
+      '<div class="col-md-6"><label class="form-label">Quantity</label><input type="number" class="form-control" id="adj_qty" min="0" step="1" value="0"></div>' +
+      '<div class="col-md-6"><label class="form-label">Date</label><input type="date" class="form-control" id="adj_date" value="'+new Date().toISOString().split('T')[0]+'"></div>' +
+      '<div class="col-12"><label class="form-label">Reason *</label><input class="form-control" id="adj_reason" placeholder="e.g. Physical stock count, shrinkage correction..."></div>' +
+      '<div class="col-12"><label class="form-label">Notes</label><textarea class="form-control" id="adj_notes" rows="2"></textarea></div>' +
+      '</div></div><div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>' +
+      '<button class="btn btn-primary" onclick="App.saveAdjust(\''+ productId +'\','+ currentQty +')"><i class="bi bi-check-lg me-1"></i>Save Adjustment</button>' +
+      '</div></div></div></div>';
+    _showModal(html);
+  }
+
+  function saveAdjust(productId, currentQty) {
+    var adjType = document.getElementById('adj_type').value;
+    var qty     = parseFloat(document.getElementById('adj_qty').value)||0;
+    var date    = document.getElementById('adj_date').value;
+    var reason  = document.getElementById('adj_reason').value;
+
+    var data = { product_id: productId, date: date, reason: reason,
+      notes: document.getElementById('adj_notes').value };
+
+    if (adjType === 'count')  { data.quantity_counted = qty; }
+    else if (adjType === 'add') { data.quantity = qty; }
+    else                         { data.quantity = -qty; }
+
+    if (!reason) { showToast('Reason is required','warning'); return; }
+    showLoading(true);
+    google.script.run
+      .withSuccessHandler(function(r) {
+        showLoading(false); _hideModal();
+        showToast('Adjustment saved. Variance: '+(r.variance>0?'+':'')+r.variance+'. Journal: '+(r.journalRef||'—'), 'success');
+        navigate('products',{view:productId});
+      })
+      .withFailureHandler(function(e){ showLoading(false); showToast(e.message,'danger'); })
+      .adjustStock(data);
+  }
+
+  // ============================================================
+  // DAMAGE MODAL
+  // ============================================================
+  function showDamageModal(productId, productName, currentQty) {
+    var html = '<div class="modal fade" id="crudModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">' +
+      '<div class="modal-header"><h5>Record Damage / Write-off</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>' +
+      '<div class="modal-body">' +
+      '<div class="alert alert-warning mb-3"><i class="bi bi-exclamation-triangle me-2"></i>Current stock: <strong>'+ currentQty +'</strong> units. Damaged goods will be expensed.</div>' +
+      '<div class="row g-3">' +
+      '<div class="col-md-6"><label class="form-label">Quantity Damaged *</label><input type="number" class="form-control" id="dmg_qty" min="1" step="1" value="1"></div>' +
+      '<div class="col-md-6"><label class="form-label">Date *</label><input type="date" class="form-control" id="dmg_date" value="'+new Date().toISOString().split('T')[0]+'"></div>' +
+      '<div class="col-12"><label class="form-label">Notes</label><textarea class="form-control" id="dmg_notes" rows="2" placeholder="Damage description, disposal method..."></textarea></div>' +
+      '</div></div><div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>' +
+      '<button class="btn btn-danger" onclick="App.saveDamage(\''+ productId +'\')"><i class="bi bi-trash me-1"></i>Write Off</button>' +
+      '</div></div></div></div>';
+    _showModal(html);
+  }
+
+  function saveDamage(productId) {
+    var data = { product_id: productId,
+      quantity: parseFloat(document.getElementById('dmg_qty').value)||0,
+      date: document.getElementById('dmg_date').value,
+      notes: document.getElementById('dmg_notes').value };
+    if (!data.quantity || data.quantity <= 0) { showToast('Enter a valid quantity','warning'); return; }
+    showLoading(true);
+    google.script.run
+      .withSuccessHandler(function(r){ showLoading(false); _hideModal();
+        showToast('Damage recorded. Value written off: '+_fmtMoney(r.value)+'. Journal: '+(r.journalRef||'—'),'success');
+        navigate('products',{view:productId}); })
+      .withFailureHandler(function(e){ showLoading(false); showToast(e.message,'danger'); })
+      .recordDamage(data);
+  }
+
+  // ============================================================
+  // TRANSFER MODAL
+  // ============================================================
+  function showTransferModal(productId, productName, currentQty, currentLocation) {
+    var html = '<div class="modal fade" id="crudModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">' +
+      '<div class="modal-header"><h5>Stock Transfer</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>' +
+      '<div class="modal-body"><div class="row g-3">' +
+      '<div class="col-md-6"><label class="form-label">Quantity *</label><input type="number" class="form-control" id="tr_qty" min="1" max="'+ currentQty +'" value="1"></div>' +
+      '<div class="col-md-6"><label class="form-label">Date *</label><input type="date" class="form-control" id="tr_date" value="'+new Date().toISOString().split('T')[0]+'"></div>' +
+      '<div class="col-md-6"><label class="form-label">From Location *</label><input class="form-control" id="tr_from" value="'+_escAttr(currentLocation||'Main Warehouse')+'"></div>' +
+      '<div class="col-md-6"><label class="form-label">To Location *</label><input class="form-control" id="tr_to" placeholder="Destination location"></div>' +
+      '<div class="col-12"><label class="form-label">Notes</label><textarea class="form-control" id="tr_notes" rows="2"></textarea></div>' +
+      '</div></div><div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>' +
+      '<button class="btn btn-primary" onclick="App.saveTransfer(\''+ productId +'\')"><i class="bi bi-arrows-move me-1"></i>Transfer</button>' +
+      '</div></div></div></div>';
+    _showModal(html);
+  }
+
+  function saveTransfer(productId) {
+    var data = { product_id: productId,
+      quantity:      parseFloat(document.getElementById('tr_qty').value)||0,
+      date:          document.getElementById('tr_date').value,
+      location_from: document.getElementById('tr_from').value,
+      location_to:   document.getElementById('tr_to').value,
+      notes:         document.getElementById('tr_notes').value };
+    if (!data.location_from || !data.location_to) { showToast('Both locations required','warning'); return; }
+    showLoading(true);
+    google.script.run
+      .withSuccessHandler(function(r){ showLoading(false); _hideModal();
+        showToast('Transfer recorded: '+data.quantity+' units moved.','success');
+        navigate('products',{view:productId}); })
+      .withFailureHandler(function(e){ showLoading(false); showToast(e.message,'danger'); })
+      .recordTransfer(data);
+  }
+
+  // ============================================================
+  // CATEGORIES
+  // ============================================================
+  function _renderCategories(c) {
+    _loading(c);
+    _callModule('categories','list',{sort:'name',order:'asc'},function(result) {
+      var rows = _data(result);
+      var html = '<div class="module-toolbar"><div></div><button class="btn btn-primary" onclick="App.showCategoryModal()"><i class="bi bi-plus-lg me-1"></i>New Category</button></div>' +
+        '<div class="card"><div class="table-container"><table class="table" id="dataTable"><thead><tr><th>Name</th><th>Description</th><th>Status</th><th></th></tr></thead><tbody>';
+      rows.forEach(function(r) {
+        if (r.status === 'Inactive') return;
+        html += '<tr><td>'+_esc(r.name)+'</td><td>'+_esc(r.description||'—')+'</td><td>'+_badge(r.status)+'</td>' +
+          '<td><button class="btn btn-sm btn-outline-secondary" onclick="event.stopPropagation();App.showCategoryModal('+ JSON.stringify({category_id:r.category_id,name:r.name,description:r.description}).replace(/"/g,'&quot;')+')">Edit</button></td></tr>';
+      });
+      if (!rows.length) html += '<tr><td colspan="4" class="empty-state"><i class="bi bi-tags"></i>No categories yet</td></tr>';
+      html += '</tbody></table></div></div>';
+      c.innerHTML = html;
+    });
+  }
+
+  function showCategoryModal(existing) {
+    var d = existing || {};
+    var html = '<div class="modal fade" id="crudModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">' +
+      '<div class="modal-header"><h5>'+( d.category_id ? 'Edit' : 'New')+' Category</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>' +
+      '<div class="modal-body"><div class="row g-3">' +
+      '<div class="col-12"><label class="form-label">Name *</label><input class="form-control" id="cat_name" value="'+_escAttr(d.name||'')+'"></div>' +
+      '<div class="col-12"><label class="form-label">Description</label><textarea class="form-control" id="cat_desc" rows="2">'+_esc(d.description||'')+'</textarea></div>' +
+      '</div></div><div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>' +
+      '<button class="btn btn-primary" onclick="App.saveCategory(\''+ _escAttr(d.category_id||'')+'\')"><i class="bi bi-check-lg me-1"></i>Save</button>' +
+      '</div></div></div></div>';
+    _showModal(html);
+  }
+
+  function saveCategory(existingId) {
+    var data = { name: document.getElementById('cat_name').value, description: document.getElementById('cat_desc').value };
+    if (existingId) data.category_id = existingId;
+    showLoading(true);
+    _callModule('categories', existingId ? 'update' : 'create', data, function(r){
+      showLoading(false); _hideModal(); showToast('Category saved','success'); navigate('categories');
+    }, function(e){ showLoading(false); showToast(e.message,'danger'); });
+  }
+
+  // ============================================================
+  // INVENTORY TRANSACTIONS
+  // ============================================================
+  function _renderInventoryTxns(c, params) {
+    _loading(c);
+    var filters = {};
+    if (params && params.product_id) filters.product_id = params.product_id;
+    _callModule('inventory','listTransactions',{filters:filters,sort:'date',order:'desc',limit:200},function(result) {
+      var rows = _data(result);
+      var html = '<div class="module-toolbar">' +
+        '<div class="search-box"><i class="bi bi-search"></i><input class="form-control" placeholder="Search transactions..." oninput="App._filterTable(this)"></div>' +
+        '<div class="d-flex gap-2">' +
+        '<select class="form-select form-select-sm" id="txnTypeFilter" onchange="App._filterTxnType()" style="width:160px;">' +
+        '<option value="">All Types</option>' +
+        ['Purchase','Sale','Adjustment In','Adjustment Out','Damage','Transfer','Customer Return','Supplier Return','Opening Stock'].map(function(t){ return '<option>'+t+'</option>'; }).join('') +
+        '</select></div></div>' +
+        '<div class="card"><div class="table-container"><table class="table table-hover" id="dataTable"><thead><tr>' +
+        '<th>Date</th><th>Product</th><th>Type</th><th class="text-end">Qty</th><th class="text-end">Unit Cost</th><th class="text-end">Total</th><th class="text-end">Bal.</th><th>Journal</th></tr></thead><tbody>';
+      rows.forEach(function(t) {
+        var q = parseFloat(t.quantity)||0;
+        var qClass = q > 0 ? 'qty-positive' : (q < 0 ? 'qty-negative' : 'qty-zero');
+        var txTypeLower = (t.type||'').toLowerCase().replace(/ /g,'_');
+        html += '<tr><td>'+_fmtDate(t.date)+'</td><td>'+_esc(t.product_name)+'</td>' +
+          '<td>'+_badge(txTypeLower)+'</td>' +
+          '<td class="text-end"><span class="'+qClass+'">'+( q > 0 ? '+' : '')+q+'</span></td>' +
+          '<td class="text-end">'+_fmtMoney(t.unit_cost)+'</td>' +
+          '<td class="text-end">'+_fmtMoney(t.total_cost)+'</td>' +
+          '<td class="text-end">'+( parseFloat(t.running_qty) !== undefined ? parseFloat(t.running_qty)||0 : '—')+'</td>' +
+          '<td class="small text-muted">'+_esc(t.journal_ref||'—')+'</td></tr>';
+      });
+      if (!rows.length) html += '<tr><td colspan="8" class="empty-state"><i class="bi bi-arrow-left-right"></i>No transactions yet</td></tr>';
+      html += '</tbody></table></div></div>';
+      c.innerHTML = html;
+    });
+  }
+
+  function _filterTxnType() {
+    var sel = document.getElementById('txnTypeFilter');
+    var val = sel ? sel.value.toLowerCase() : '';
+    var rows = document.querySelectorAll('#dataTable tbody tr');
+    rows.forEach(function(row){ row.style.display = (!val || row.textContent.toLowerCase().indexOf(val) !== -1) ? '' : 'none'; });
+  }
+
+  // ============================================================
+  // LOW STOCK REPORT
+  // ============================================================
+  function _renderLowStock(c) {
+    _loading(c);
+    google.script.run.withSuccessHandler(function(report) {
+      var html = '<div class="row g-3 mb-4">' +
+        '<div class="col-md-6"><div class="card"><div class="card-header" style="background:#fce8e6;color:#ea4335;"><i class="bi bi-x-circle me-2"></i>Out of Stock ('+report.totalOut+')</div><div class="p-0">';
+      if (report.outOfStock.length) {
+        report.outOfStock.forEach(function(p) {
+          html += '<div class="reorder-row"><div class="reorder-qty qty-negative">0</div>' +
+            '<div class="reorder-name"><div class="fw-bold">'+_esc(p.name)+'</div><div class="text-muted small">SKU: '+_esc(p.sku)+'</div></div>' +
+            '<div class="reorder-actions"><button class="btn btn-sm btn-danger" onclick="App.showAdjustModal(\''+ p.product_id +'\',\''+ _escAttr(p.name)+'\',0)">Adjust</button></div></div>';
+        });
+      } else { html += '<div class="p-4 text-center text-muted">All items in stock ✓</div>'; }
+      html += '</div></div></div>' +
+        '<div class="col-md-6"><div class="card"><div class="card-header" style="background:#fef7e0;color:#f9a825;"><i class="bi bi-exclamation-triangle me-2"></i>Low Stock ('+report.totalLow+')</div><div class="p-0">';
+      if (report.lowStock.length) {
+        report.lowStock.forEach(function(p) {
+          var pct = p.reorder_level > 0 ? Math.round(p.quantity/p.reorder_level*100) : 100;
+          html += '<div class="reorder-row"><div class="reorder-qty qty-negative">'+p.quantity+'</div>' +
+            '<div class="reorder-name"><div class="fw-bold">'+_esc(p.name)+'</div>' +
+            '<div class="stock-level-bar mt-1"><div class="stock-level-fill low" style="width:'+ Math.min(100,pct) +'%"></div></div></div>' +
+            '<div class="reorder-actions"><button class="btn btn-sm btn-warning" onclick="App.showAdjustModal(\''+ p.product_id +'\',\''+ _escAttr(p.name)+'\','+ p.quantity+')">Adjust</button></div></div>';
+        });
+      } else { html += '<div class="p-4 text-center text-muted">No low stock items ✓</div>'; }
+      html += '</div></div></div></div>';
+      c.innerHTML = html;
+    }).withFailureHandler(function(e){ c.innerHTML='<div class="alert alert-danger">'+e.message+'</div>'; })
+    .getLowStockReport();
+  }
+
+  // ============================================================
+  // VALUATION REPORT
+  // ============================================================
+  function _renderValuation(c) {
+    _loading(c);
+    google.script.run.withSuccessHandler(function(report) {
+      var sym = _config.currencySymbol || 'GH₵';
+      var html = '<div class="card mb-3"><div class="card-body d-flex justify-content-between align-items-center">' +
+        '<div><h5 class="mb-0">Total Inventory Value</h5><small class="text-muted">'+report.totalItems+' products &middot; As at '+new Date().toLocaleDateString()+'</small></div>' +
+        '<div class="kpi-value text-success">'+_fmtMoney(report.totalValue,sym)+'</div></div></div>' +
+        '<div class="card"><div class="table-container"><table class="table" id="dataTable"><thead><tr>' +
+        '<th>SKU</th><th>Name</th><th>Category</th><th>Valuation</th><th class="text-end">Qty</th><th class="text-end">Unit Cost</th><th class="text-end">Stock Value</th><th>Stock Level</th></tr></thead><tbody>';
+      (report.items||[]).forEach(function(item) {
+        var vm = (item.valuation_method||'wa').toLowerCase() === 'fifo' ? 'fifo' : 'wa';
+        html += '<tr onclick="App.navigate(\'products\',{view:\''+ item.product_id +'\'})"><td><code>'+_esc(item.sku)+'</code></td><td>'+_esc(item.name)+'</td>' +
+          '<td>'+_esc(item.category||'—')+'</td>' +
+          '<td><span class="valuation-badge '+ vm +"'>" + (vm==='fifo'?'FIFO':'W.Avg')+'</span></td>' +
+          '<td class="text-end">'+item.quantity+'</td><td class="text-end">'+_fmtMoney(item.cost_price,sym)+'</td>' +
+          '<td class="text-end fw-bold">'+_fmtMoney(item.total_value,sym)+'</td>' +
+          '<td>'+_badge(item.quantity<=0?'out_of_stock':item.quantity<=item.reorder_level?'low':'ok')+'</td></tr>';
+      });
+      html += '</tbody><tfoot><tr class="fw-bold"><td colspan="6" class="text-end">Total</td><td class="text-end">'+_fmtMoney(report.totalValue,sym)+'</td><td></td></tr></tfoot></table></div></div>';
+      c.innerHTML = html;
+    }).withFailureHandler(function(e){ c.innerHTML='<div class="alert alert-danger">'+e.message+'</div>'; })
+    .getInventoryValuation();
+  }
+
+  // ============================================================
+  // SUPPLIERS
+  // ============================================================
+  function _renderSuppliers(c, params) {
+    if (params && params.view) { _renderSupplierDetail(c, params.view); return; }
+    _loading(c);
+    _callModule('suppliers','list',{sort:'name',order:'asc'},function(result) {
+      var rows = _data(result);
+      var html = '<div class="module-toolbar">' +
+        '<div class="search-box"><i class="bi bi-search"></i><input class="form-control" placeholder="Search suppliers..." oninput="App._filterTable(this)"></div>' +
+        '<button class="btn btn-primary" onclick="App.showSupplierModal()"><i class="bi bi-plus-lg me-1"></i>New Supplier</button></div>' +
+        '<div class="card"><div class="table-container"><table class="table table-hover" id="dataTable"><thead><tr><th>Name</th><th>Email</th><th>Phone</th><th class="text-end">Balance</th><th>Status</th></tr></thead><tbody>';
+      rows.forEach(function(r) {
+        if (r.status === 'Inactive') return;
+        html += '<tr onclick="App.navigate(\'suppliers\',{view:\''+ r.supplier_id +'\'})"><td>'+_esc(r.name)+'</td><td>'+_esc(r.email||'—')+'</td><td>'+_esc(r.phone||'—')+'</td>' +
+          '<td class="text-end">'+_fmtMoney(r.balance)+'</td><td>'+_badge(r.status)+'</td></tr>';
+      });
+      if (!rows.length) html += '<tr><td colspan="5" class="empty-state"><i class="bi bi-truck"></i>No suppliers yet</td></tr>';
+      html += '</tbody></table></div></div>';
+      c.innerHTML = html;
+    });
+  }
+
+  function _renderSupplierDetail(c, id) {
+    _loading(c);
+    _callModule('suppliers','get',{id:id},function(sup) {
+      var html = '<a href="javascript:void(0)" class="text-decoration-none mb-3 d-inline-block" onclick="App.navigate(\'suppliers\')"><i class="bi bi-arrow-left me-1"></i>Back to Suppliers</a>' +
+        '<div class="detail-header"><div><h4>'+_esc(sup.name)+'</h4><p class="text-muted mb-0">'+_esc(sup.email||'')+' &middot; '+_esc(sup.phone||'')+'</p></div>' +
+        '<div class="action-btn-group"><button class="btn btn-outline-primary" onclick="App.showSupplierModal('+ JSON.stringify({supplier_id:sup.supplier_id,name:sup.name,email:sup.email,phone:sup.phone,address:sup.address,city:sup.city,payment_terms:sup.payment_terms,notes:sup.notes}).replace(/"/g,'&quot;')+')"><i class="bi bi-pencil me-1"></i>Edit</button></div></div>' +
+        '<div class="detail-meta mb-4">' +
+        '<div class="meta-item"><div class="meta-label">Balance</div><div class="meta-value">'+_fmtMoney(sup.balance)+'</div></div>' +
+        '<div class="meta-item"><div class="meta-label">Terms</div><div class="meta-value">'+( sup.payment_terms||30 )+' days</div></div></div>' +
+        '<div class="card"><div class="card-header"><span>Recent Purchase Orders</span></div>' +
+        '<div class="table-container"><table class="table"><thead><tr><th>PO Number</th><th>Date</th><th>Total</th><th>Balance</th><th>Status</th></tr></thead><tbody>';
+      (sup.recentOrders||[]).forEach(function(po) {
+        html += '<tr><td>'+_esc(po.po_number)+'</td><td>'+_fmtDate(po.date)+'</td><td>'+_fmtMoney(po.total)+'</td><td>'+_fmtMoney(po.balance_due)+'</td><td>'+_badge(po.status)+'</td></tr>';
+      });
+      if (!(sup.recentOrders||[]).length) html += '<tr><td colspan="5" class="text-center text-muted py-3">No orders yet</td></tr>';
+      html += '</tbody></table></div></div>';
+      c.innerHTML = html;
+    });
+  }
+
+  function showSupplierModal(existing) {
+    var d = existing || {};
+    var html = '<div class="modal fade" id="crudModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">' +
+      '<div class="modal-header"><h5>'+( d.supplier_id ? 'Edit Supplier' : 'New Supplier')+'</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>' +
+      '<div class="modal-body"><div class="row g-3">' +
+      '<div class="col-12"><label class="form-label">Name *</label><input class="form-control" id="sup_name" value="'+_escAttr(d.name||'')+'"></div>' +
+      '<div class="col-md-6"><label class="form-label">Email</label><input class="form-control" id="sup_email" value="'+_escAttr(d.email||'')+'"></div>' +
+      '<div class="col-md-6"><label class="form-label">Phone</label><input class="form-control" id="sup_phone" value="'+_escAttr(d.phone||'')+'"></div>' +
+      '<div class="col-12"><label class="form-label">Address</label><input class="form-control" id="sup_addr" value="'+_escAttr(d.address||'')+'"></div>' +
+      '<div class="col-md-6"><label class="form-label">City</label><input class="form-control" id="sup_city" value="'+_escAttr(d.city||'')+'"></div>' +
+      '<div class="col-md-6"><label class="form-label">Payment Terms (days)</label><input type="number" class="form-control" id="sup_terms" value="'+( d.payment_terms||30 )+'"></div>' +
+      '<div class="col-12"><label class="form-label">Notes</label><textarea class="form-control" id="sup_notes" rows="2">'+_esc(d.notes||'')+'</textarea></div>' +
+      '</div></div><div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>' +
+      '<button class="btn btn-primary" onclick="App.saveSupplier(\''+ _escAttr(d.supplier_id||'')+'\')"><i class="bi bi-check-lg me-1"></i>Save</button>' +
+      '</div></div></div></div>';
+    _showModal(html);
+  }
+
+  function saveSupplier(existingId) {
+    var data = { name:document.getElementById('sup_name').value, email:document.getElementById('sup_email').value,
+      phone:document.getElementById('sup_phone').value, address:document.getElementById('sup_addr').value,
+      city:document.getElementById('sup_city').value, payment_terms:parseInt(document.getElementById('sup_terms').value)||30,
+      notes:document.getElementById('sup_notes').value };
+    if (existingId) data.supplier_id = existingId;
+    showLoading(true);
+    _callModule('suppliers', existingId ? 'update' : 'create', data, function(r){
+      showLoading(false); _hideModal();
+      showToast('Supplier '+(existingId?'updated':'created'), 'success');
+      navigate('suppliers');
+    }, function(e){ showLoading(false); showToast(e.message,'danger'); });
+  }
+
+  // ============================================================
+  // PAYROLL HUB
+  // ============================================================
+  function _renderPayrollHub(c) {
+    _callModule('employees','list',{filters:{status:'Active'}},function(empRes){
+      var empCount=(_data(empRes)).length;
+      _callModule('payroll','list',{sort:'period',order:'desc',limit:1},function(payRes){
+        var lastRun=(_data(payRes))[0];
+        var sym=_config.currencySymbol||'GH₵';
+        var kpis=[
+          {l:'Active Employees',v:empCount,col:'info'},
+          {l:'Last Run',v:lastRun?lastRun.period:'—',col:'success'},
+          {l:'Last Gross',v:lastRun?_fmtMoney(lastRun.total_gross,sym):'—',col:'warning'},
+          {l:'Last Net',v:lastRun?_fmtMoney(lastRun.total_net,sym):'—',col:'primary'}
+        ].map(function(k){return '<div class="col-6 col-md-3"><div class="kpi-card '+k.col+'"><div class="kpi-label">'+k.l+'</div><div class="kpi-value">'+k.v+'</div></div></div>';}).join('');
+        var cards=[
+          {m:'employees',i:'people',t:'Employees',d:'Manage staff records'},
+          {m:'salary-structures',i:'diagram-3',t:'Salary Structures',d:'Reusable pay templates'},
+          {m:'payroll-runs',i:'cash-stack',t:'Payroll Runs',d:'Process monthly payroll'}
+        ].map(function(x){return '<div class="inv-hub-card" onclick="App.navigate(\''+x.m+'\')"><i class="bi bi-'+x.i+'"></i><h6>'+x.t+'</h6><p>'+x.d+'</p></div>';}).join('');
+        c.innerHTML='<div class="row g-3 mb-4">'+kpis+'</div><div class="inv-hub-cards">'+cards+'</div>';
+      });
+    });
+  }
+
+  // ============================================================
+  // EMPLOYEES
+  // ============================================================
+  function _renderEmployees(c, params) {
+    if (params && params.view) { _renderEmployeeDetail(c, params.view); return; }
+    _loading(c);
+    _callModule('employees','list',{sort:'first_name',order:'asc'},function(result){
+      var rows=_data(result);
+      var html='<div class="module-toolbar"><div class="search-box"><i class="bi bi-search"></i>' +
+        '<input class="form-control" placeholder="Search employees..." oninput="App._filterTable(this)"></div>' +
+        '<button class="btn btn-primary" onclick="App.showEmployeeModal()"><i class="bi bi-plus-lg me-1"></i>New Employee</button></div>' +
+        '<div class="card"><div class="table-container"><table class="table table-hover" id="dataTable"><thead><tr>' +
+        '<th>Number</th><th>Name</th><th>Position</th><th>Department</th><th class="text-end">Basic Salary</th><th>Status</th></tr></thead><tbody>';
+      rows.forEach(function(r){
+        if(r.status==='Terminated') return;
+        html+='<tr onclick="App.navigate(\'employees\',{view:\''+r.employee_id+'\'})">' +
+          '<td><code>'+_esc(r.employee_number)+'</code></td><td>'+_esc(r.first_name)+' '+_esc(r.last_name)+'</td>' +
+          '<td>'+_esc(r.position||'—')+'</td><td>'+_esc(r.department||'—')+'</td>' +
+          '<td class="text-end">'+_fmtMoney(r.basic_salary)+'</td><td>'+_badge(r.status)+'</td></tr>';
+      });
+      if(!rows.length) html+='<tr><td colspan="6" class="empty-state"><i class="bi bi-people"></i>No employees yet</td></tr>';
+      html+='</tbody></table></div></div>';
+      c.innerHTML=html;
+    });
+  }
+
+  function _renderEmployeeDetail(c, id) {
+    _loading(c);
+    _callModule('employees','get',{id:id},function(emp){
+      var sym=_config.currencySymbol||'GH₵';
+      var allow=(parseFloat(emp.transport_allowance)||0)+(parseFloat(emp.housing_allowance)||0)+(parseFloat(emp.other_allowance)||0);
+      var html='<a href="javascript:void(0)" class="text-decoration-none mb-3 d-inline-block" onclick="App.navigate(\'employees\')"><i class="bi bi-arrow-left me-1"></i>Back to Employees</a>' +
+        '<div class="detail-header"><div><h4>'+_esc(emp.first_name)+' '+_esc(emp.last_name)+'</h4>' +
+        '<p class="text-muted mb-0"><code>'+_esc(emp.employee_number)+'</code> &middot; '+_esc(emp.position||'')+' &middot; '+_esc(emp.department||'')+'</p></div>' +
+        '<div class="action-btn-group">' +
+        '<button class="btn btn-outline-primary" onclick="App.showEmployeeModal('+JSON.stringify({employee_id:emp.employee_id,first_name:emp.first_name,last_name:emp.last_name,email:emp.email,phone:emp.phone,position:emp.position,department:emp.department,employment_type:emp.employment_type,basic_salary:emp.basic_salary,transport_allowance:emp.transport_allowance,housing_allowance:emp.housing_allowance,other_allowance:emp.other_allowance,ssnit_applicable:emp.ssnit_applicable,paye_applicable:emp.paye_applicable,bank_name:emp.bank_name,bank_account:emp.bank_account,tax_id:emp.tax_id,pension_id:emp.pension_id}).replace(/"/g,'&quot;')+')"><i class="bi bi-pencil me-1"></i>Edit</button>' +
+        '<button class="btn btn-success" onclick="App.previewEmployeePayslip(\''+id+'\')"><i class="bi bi-calculator me-1"></i>Preview Payslip</button>' +
+        '</div></div>' +
+        '<div class="detail-meta mb-4">' +
+        '<div class="meta-item"><div class="meta-label">Basic Salary</div><div class="meta-value">'+_fmtMoney(emp.basic_salary,sym)+'</div></div>' +
+        '<div class="meta-item"><div class="meta-label">Allowances</div><div class="meta-value">'+_fmtMoney(allow,sym)+'</div></div>' +
+        '<div class="meta-item"><div class="meta-label">SSNIT</div><div class="meta-value">'+(emp.ssnit_applicable!==false&&emp.ssnit_applicable!=='false'?'Yes':'No')+'</div></div>' +
+        '<div class="meta-item"><div class="meta-label">PAYE</div><div class="meta-value">'+(emp.paye_applicable!==false&&emp.paye_applicable!=='false'?'Yes':'No')+'</div></div>' +
+        '<div class="meta-item"><div class="meta-label">Bank</div><div class="meta-value">'+_esc(emp.bank_name||'—')+'</div></div>' +
+        '<div class="meta-item"><div class="meta-label">SSNIT No.</div><div class="meta-value">'+_esc(emp.pension_id||'—')+'</div></div>' +
+        '</div>' +
+        '<div id="payslipPreview"></div>' +
+        '<div class="card"><div class="card-header"><span>Recent Payslips</span></div>' +
+        '<div class="table-container"><table class="table"><thead><tr><th>Period</th><th class="text-end">Gross</th><th class="text-end">SSNIT</th><th class="text-end">PAYE</th><th class="text-end">Net</th></tr></thead><tbody>';
+      (emp.payslips||[]).forEach(function(p){
+        html+='<tr><td>'+_fmtDate(p.created_at)+'</td><td class="text-end">'+_fmtMoney(p.gross_pay)+'</td>' +
+          '<td class="text-end">'+_fmtMoney(p.pension_employee)+'</td><td class="text-end">'+_fmtMoney(p.paye_tax)+'</td>' +
+          '<td class="text-end fw-bold">'+_fmtMoney(p.net_pay)+'</td></tr>';
+      });
+      if(!(emp.payslips||[]).length) html+='<tr><td colspan="5" class="text-center text-muted py-3">No payslips yet</td></tr>';
+      html+='</tbody></table></div></div>';
+      c.innerHTML=html;
+    });
+  }
+
+  function previewEmployeePayslip(id) {
+    var el=document.getElementById('payslipPreview');
+    el.innerHTML='<div class="module-loading"><div class="spinner-border text-primary"></div></div>';
+    google.script.run.withSuccessHandler(function(p){
+      el.innerHTML=_payslipCard(p);
+    }).withFailureHandler(function(e){el.innerHTML='<div class="alert alert-danger">'+e.message+'</div>';}).previewPayslip({id:id});
+  }
+
+  function _payslipCard(p) {
+    var sym=_config.currencySymbol||'GH₵';
+    var brk=(p.paye_breakdown||[]).map(function(b){return '<tr><td class="ps-4 small text-muted">Band '+b.band+' @ '+b.rate+'%</td><td class="text-end small text-muted">'+_fmtMoney(b.tax,sym)+'</td></tr>';}).join('');
+    return '<div class="card mb-3 border-success"><div class="card-header bg-success text-white">Payslip Preview — '+_esc(p.employee_name||'')+'</div>' +
+      '<div class="table-container"><table class="table table-sm mb-0"><tbody>' +
+      '<tr><td>Basic Salary</td><td class="text-end">'+_fmtMoney(p.basic_salary,sym)+'</td></tr>' +
+      '<tr><td>Allowances</td><td class="text-end">'+_fmtMoney(p.allowances,sym)+'</td></tr>' +
+      (p.overtime?'<tr><td>Overtime</td><td class="text-end">'+_fmtMoney(p.overtime,sym)+'</td></tr>':'') +
+      '<tr class="table-light fw-bold"><td>Gross Pay</td><td class="text-end">'+_fmtMoney(p.gross_pay,sym)+'</td></tr>' +
+      '<tr><td>SSNIT Employee (5.5%)</td><td class="text-end text-danger">-'+_fmtMoney(p.pension_employee,sym)+'</td></tr>' +
+      '<tr><td>Chargeable Income</td><td class="text-end">'+_fmtMoney(p.chargeable_income,sym)+'</td></tr>' +
+      '<tr><td>PAYE Tax</td><td class="text-end text-danger">-'+_fmtMoney(p.paye_tax,sym)+'</td></tr>' +
+      brk +
+      (p.other_deductions?'<tr><td>Other Deductions</td><td class="text-end text-danger">-'+_fmtMoney(p.other_deductions,sym)+'</td></tr>':'') +
+      '<tr class="table-light fw-bold"><td>Total Deductions</td><td class="text-end">'+_fmtMoney(p.total_deductions,sym)+'</td></tr>' +
+      '<tr class="table-success fw-bold"><td>Net Pay</td><td class="text-end">'+_fmtMoney(p.net_pay,sym)+'</td></tr>' +
+      '<tr><td class="small text-muted">Employer SSNIT (13%)</td><td class="text-end small text-muted">'+_fmtMoney(p.pension_employer,sym)+'</td></tr>' +
+      '<tr><td class="small text-muted">Total Employer Cost</td><td class="text-end small text-muted">'+_fmtMoney(p.employer_cost,sym)+'</td></tr>' +
+      '</tbody></table></div></div>';
+  }
+
+  function showEmployeeModal(existing) {
+    var d=existing||{};
+    _callModule('salaryStructures','list',{filters:{status:'Active'}},function(sRes){
+      var structs=_data(sRes);
+      var sOpts='<option value="">— none —</option>'+structs.map(function(s){return '<option value="'+s.structure_id+'">'+_esc(s.name)+' ('+_fmtMoney(s.basic_salary)+')</option>';}).join('');
+      var isEdit=!!d.employee_id;
+      var ssnitChecked=(d.ssnit_applicable!==false&&d.ssnit_applicable!=='false')?'checked':'';
+      var payeChecked=(d.paye_applicable!==false&&d.paye_applicable!=='false')?'checked':'';
+      var html='<div class="modal fade" id="crudModal" tabindex="-1"><div class="modal-dialog modal-lg"><div class="modal-content">' +
+        '<div class="modal-header"><h5>'+(isEdit?'Edit Employee':'New Employee')+'</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>' +
+        '<div class="modal-body"><div class="row g-3">' +
+        '<div class="col-md-6"><label class="form-label">First Name *</label><input class="form-control" id="emp_fn" value="'+_escAttr(d.first_name||'')+'"></div>' +
+        '<div class="col-md-6"><label class="form-label">Last Name *</label><input class="form-control" id="emp_ln" value="'+_escAttr(d.last_name||'')+'"></div>' +
+        '<div class="col-md-6"><label class="form-label">Email</label><input class="form-control" id="emp_email" value="'+_escAttr(d.email||'')+'"></div>' +
+        '<div class="col-md-6"><label class="form-label">Phone</label><input class="form-control" id="emp_phone" value="'+_escAttr(d.phone||'')+'"></div>' +
+        '<div class="col-md-6"><label class="form-label">Position</label><input class="form-control" id="emp_pos" value="'+_escAttr(d.position||'')+'"></div>' +
+        '<div class="col-md-6"><label class="form-label">Department</label><input class="form-control" id="emp_dept" value="'+_escAttr(d.department||'')+'"></div>' +
+        (!isEdit?'<div class="col-md-6"><label class="form-label">Salary Structure</label><select class="form-select" id="emp_struct" onchange="App._applyStructure()">'+sOpts+'</select></div>':'') +
+        '<div class="col-md-6"><label class="form-label">Employment Type</label><select class="form-select" id="emp_type"><option>Full-time</option><option>Part-time</option><option>Contract</option></select></div>' +
+        '<div class="col-12"><hr class="my-1"><small class="text-muted fw-bold">Salary & Allowances (monthly, GHS)</small></div>' +
+        '<div class="col-md-3"><label class="form-label">Basic Salary *</label><input type="number" step="0.01" class="form-control" id="emp_basic" value="'+(d.basic_salary||0)+'"></div>' +
+        '<div class="col-md-3"><label class="form-label">Transport</label><input type="number" step="0.01" class="form-control" id="emp_transport" value="'+(d.transport_allowance||0)+'"></div>' +
+        '<div class="col-md-3"><label class="form-label">Housing</label><input type="number" step="0.01" class="form-control" id="emp_housing" value="'+(d.housing_allowance||0)+'"></div>' +
+        '<div class="col-md-3"><label class="form-label">Other</label><input type="number" step="0.01" class="form-control" id="emp_other" value="'+(d.other_allowance||0)+'"></div>' +
+        '<div class="col-md-6"><div class="form-check mt-2"><input class="form-check-input" type="checkbox" id="emp_ssnit" '+ssnitChecked+'><label class="form-check-label" for="emp_ssnit">SSNIT applicable (5.5% / 13%)</label></div></div>' +
+        '<div class="col-md-6"><div class="form-check mt-2"><input class="form-check-input" type="checkbox" id="emp_paye" '+payeChecked+'><label class="form-check-label" for="emp_paye">PAYE applicable</label></div></div>' +
+        '<div class="col-12"><hr class="my-1"><small class="text-muted fw-bold">Bank & Statutory IDs</small></div>' +
+        '<div class="col-md-4"><label class="form-label">Bank Name</label><input class="form-control" id="emp_bank" value="'+_escAttr(d.bank_name||'')+'"></div>' +
+        '<div class="col-md-4"><label class="form-label">Account No.</label><input class="form-control" id="emp_acct" value="'+_escAttr(d.bank_account||'')+'"></div>' +
+        '<div class="col-md-4"><label class="form-label">SSNIT No.</label><input class="form-control" id="emp_pension" value="'+_escAttr(d.pension_id||'')+'"></div>' +
+        '<div class="col-md-4"><label class="form-label">Tax ID (TIN)</label><input class="form-control" id="emp_tax" value="'+_escAttr(d.tax_id||'')+'"></div>' +
+        '</div></div><div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>' +
+        '<button class="btn btn-primary" onclick="App.saveEmployee(\''+_escAttr(d.employee_id||'')+'\')"><i class="bi bi-check-lg me-1"></i>Save</button></div></div></div></div>';
+      _showModal(html);
+      if(d.employment_type){var t=document.getElementById('emp_type');for(var i=0;i<t.options.length;i++)if(t.options[i].value===d.employment_type)t.selectedIndex=i;}
+      _payrollStructures=structs;
+    });
+  }
+
+  function _applyStructure() {
+    var sel=document.getElementById('emp_struct');
+    var sid=sel?sel.value:'';
+    if(!sid)return;
+    var s=(_payrollStructures||[]).filter(function(x){return x.structure_id===sid;})[0];
+    if(!s)return;
+    document.getElementById('emp_basic').value=s.basic_salary||0;
+    document.getElementById('emp_transport').value=s.transport_allowance||0;
+    document.getElementById('emp_housing').value=s.housing_allowance||0;
+    document.getElementById('emp_other').value=s.other_allowance||0;
+  }
+
+  function saveEmployee(existingId) {
+    var data={
+      first_name:document.getElementById('emp_fn').value,
+      last_name:document.getElementById('emp_ln').value,
+      email:document.getElementById('emp_email').value,
+      phone:document.getElementById('emp_phone').value,
+      position:document.getElementById('emp_pos').value,
+      department:document.getElementById('emp_dept').value,
+      employment_type:document.getElementById('emp_type').value,
+      basic_salary:parseFloat(document.getElementById('emp_basic').value)||0,
+      transport_allowance:parseFloat(document.getElementById('emp_transport').value)||0,
+      housing_allowance:parseFloat(document.getElementById('emp_housing').value)||0,
+      other_allowance:parseFloat(document.getElementById('emp_other').value)||0,
+      ssnit_applicable:document.getElementById('emp_ssnit').checked,
+      paye_applicable:document.getElementById('emp_paye').checked,
+      bank_name:document.getElementById('emp_bank').value,
+      bank_account:document.getElementById('emp_acct').value,
+      pension_id:document.getElementById('emp_pension').value,
+      tax_id:document.getElementById('emp_tax').value
+    };
+    var structEl=document.getElementById('emp_struct');
+    if(structEl&&structEl.value)data.structure_id=structEl.value;
+    if(existingId)data.employee_id=existingId;
+    if(!data.first_name||!data.last_name){showToast('First and last name required','warning');return;}
+    showLoading(true);
+    _callModule('employees',existingId?'update':'create',data,function(r){
+      showLoading(false);_hideModal();showToast('Employee saved','success');
+      navigate('employees',existingId?{view:existingId}:undefined);
+    },function(e){showLoading(false);showToast(e.message,'danger');});
+  }
+
+  // ============================================================
+  // SALARY STRUCTURES
+  // ============================================================
+  function _renderSalaryStructures(c) {
+    _loading(c);
+    _callModule('salaryStructures','list',{sort:'name',order:'asc'},function(result){
+      var rows=_data(result);
+      var html='<div class="module-toolbar"><div></div>' +
+        '<button class="btn btn-primary" onclick="App.showStructureModal()"><i class="bi bi-plus-lg me-1"></i>New Structure</button></div>' +
+        '<div class="card"><div class="table-container"><table class="table" id="dataTable"><thead><tr>' +
+        '<th>Name</th><th class="text-end">Basic</th><th class="text-end">Transport</th><th class="text-end">Housing</th><th class="text-end">Other</th><th></th></tr></thead><tbody>';
+      rows.forEach(function(r){
+        if(r.status==='Inactive')return;
+        html+='<tr><td>'+_esc(r.name)+'</td><td class="text-end">'+_fmtMoney(r.basic_salary)+'</td>' +
+          '<td class="text-end">'+_fmtMoney(r.transport_allowance)+'</td><td class="text-end">'+_fmtMoney(r.housing_allowance)+'</td>' +
+          '<td class="text-end">'+_fmtMoney(r.other_allowance)+'</td>' +
+          '<td><button class="btn btn-sm btn-outline-secondary" onclick="App.showStructureModal('+JSON.stringify({structure_id:r.structure_id,name:r.name,description:r.description,basic_salary:r.basic_salary,transport_allowance:r.transport_allowance,housing_allowance:r.housing_allowance,other_allowance:r.other_allowance}).replace(/"/g,'&quot;')+')">Edit</button></td></tr>';
+      });
+      if(!rows.length) html+='<tr><td colspan="6" class="empty-state"><i class="bi bi-diagram-3"></i>No salary structures yet</td></tr>';
+      html+='</tbody></table></div></div>';
+      c.innerHTML=html;
+    });
+  }
+
+  function showStructureModal(existing) {
+    var d=existing||{};
+    var html='<div class="modal fade" id="crudModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">' +
+      '<div class="modal-header"><h5>'+(d.structure_id?'Edit':'New')+' Salary Structure</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>' +
+      '<div class="modal-body"><div class="row g-3">' +
+      '<div class="col-12"><label class="form-label">Name *</label><input class="form-control" id="st_name" value="'+_escAttr(d.name||'')+'" placeholder="e.g. Junior Officer Grade 1"></div>' +
+      '<div class="col-12"><label class="form-label">Description</label><input class="form-control" id="st_desc" value="'+_escAttr(d.description||'')+'"></div>' +
+      '<div class="col-md-3"><label class="form-label">Basic *</label><input type="number" step="0.01" class="form-control" id="st_basic" value="'+(d.basic_salary||0)+'"></div>' +
+      '<div class="col-md-3"><label class="form-label">Transport</label><input type="number" step="0.01" class="form-control" id="st_transport" value="'+(d.transport_allowance||0)+'"></div>' +
+      '<div class="col-md-3"><label class="form-label">Housing</label><input type="number" step="0.01" class="form-control" id="st_housing" value="'+(d.housing_allowance||0)+'"></div>' +
+      '<div class="col-md-3"><label class="form-label">Other</label><input type="number" step="0.01" class="form-control" id="st_other" value="'+(d.other_allowance||0)+'"></div>' +
+      '</div></div><div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>' +
+      '<button class="btn btn-primary" onclick="App.saveStructure(\''+_escAttr(d.structure_id||'')+'\')"><i class="bi bi-check-lg me-1"></i>Save</button></div></div></div></div>';
+    _showModal(html);
+  }
+
+  function saveStructure(existingId) {
+    var data={name:document.getElementById('st_name').value,description:document.getElementById('st_desc').value,
+      basic_salary:parseFloat(document.getElementById('st_basic').value)||0,
+      transport_allowance:parseFloat(document.getElementById('st_transport').value)||0,
+      housing_allowance:parseFloat(document.getElementById('st_housing').value)||0,
+      other_allowance:parseFloat(document.getElementById('st_other').value)||0};
+    if(existingId)data.structure_id=existingId;
+    if(!data.name){showToast('Name required','warning');return;}
+    showLoading(true);
+    _callModule('salaryStructures',existingId?'update':'create',data,function(){
+      showLoading(false);_hideModal();showToast('Structure saved','success');navigate('salary-structures');
+    },function(e){showLoading(false);showToast(e.message,'danger');});
+  }
+
+  // ============================================================
+  // PAYROLL RUNS
+  // ============================================================
+  function _renderPayrollRuns(c, params) {
+    if (params && params.view) { _renderPayrollRunDetail(c, params.view); return; }
+    _loading(c);
+    _callModule('payroll','list',{sort:'period',order:'desc'},function(result){
+      var rows=_data(result);
+      var thisMonth=new Date().toISOString().slice(0,7);
+      var html='<div class="card mb-3"><div class="card-body d-flex flex-wrap gap-2 align-items-end">' +
+        '<div><label class="form-label small mb-1">Period to run</label><input type="month" class="form-control form-control-sm" id="payPeriod" value="'+thisMonth+'"></div>' +
+        '<button class="btn btn-sm btn-outline-primary" onclick="App.previewPayrollRun()"><i class="bi bi-eye me-1"></i>Preview</button>' +
+        '<button class="btn btn-sm btn-primary" onclick="App.processPayrollRun()"><i class="bi bi-play-fill me-1"></i>Process</button>' +
+        '</div></div><div id="payPreview"></div>' +
+        '<div class="card"><div class="card-header">Payroll History</div><div class="table-container"><table class="table table-hover"><thead><tr>' +
+        '<th>Period</th><th class="text-end">Employees</th><th class="text-end">Gross</th><th class="text-end">PAYE</th><th class="text-end">SSNIT</th><th class="text-end">Net</th><th>Status</th></tr></thead><tbody>';
+      rows.forEach(function(r){
+        html+='<tr onclick="App.navigate(\'payroll-runs\',{view:\''+r.payroll_id+'\'})"><td><strong>'+_esc(r.period)+'</strong></td>' +
+          '<td class="text-end">'+(r.employee_count||0)+'</td><td class="text-end">'+_fmtMoney(r.total_gross)+'</td>' +
+          '<td class="text-end">'+_fmtMoney(r.total_paye)+'</td><td class="text-end">'+_fmtMoney((parseFloat(r.total_pension_employee)||0)+(parseFloat(r.total_pension_employer)||0))+'</td>' +
+          '<td class="text-end fw-bold">'+_fmtMoney(r.total_net)+'</td><td>'+_badge(r.status)+'</td></tr>';
+      });
+      if(!rows.length) html+='<tr><td colspan="7" class="text-center text-muted py-3">No payroll runs yet</td></tr>';
+      html+='</tbody></table></div></div>';
+      c.innerHTML=html;
+    });
+  }
+
+  function previewPayrollRun() {
+    var period=document.getElementById('payPeriod').value;
+    if(!period){showToast('Select a period','warning');return;}
+    var el=document.getElementById('payPreview');
+    el.innerHTML='<div class="module-loading"><div class="spinner-border text-primary"></div></div>';
+    google.script.run.withSuccessHandler(function(prev){
+      el.innerHTML=_payrollPreviewCard(prev,period,false);
+    }).withFailureHandler(function(e){el.innerHTML='<div class="alert alert-danger">'+e.message+'</div>';}).previewPayroll({period:period});
+  }
+
+  function processPayrollRun() {
+    var period=document.getElementById('payPeriod').value;
+    if(!period){showToast('Select a period','warning');return;}
+    var html='<div class="modal fade" id="crudModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">' +
+      '<div class="modal-header"><h5><i class="bi bi-cash-stack me-2 text-primary"></i>Process Payroll '+period+'</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>' +
+      '<div class="modal-body"><div class="alert alert-info mb-0"><i class="bi bi-info-circle me-2"></i>This will generate payslips for all active employees and post the payroll journal to accounting. Run a preview first to review the figures.</div></div>' +
+      '<div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>' +
+      '<button class="btn btn-primary" onclick="App._doProcessPayroll(\''+period+'\')"><i class="bi bi-play-fill me-1"></i>Process & Post</button></div></div></div></div>';
+    _showModal(html);
+  }
+
+  function _doProcessPayroll(period) {
+    _hideModal();showLoading(true);
+    google.script.run.withSuccessHandler(function(r){
+      showLoading(false);
+      showToast('Payroll '+period+' processed. Journal: '+(r.journalRef||'—')+'. Net: '+_fmtMoney(r.totals.net_pay),'success');
+      navigate('payroll-runs',{view:r.payrollId});
+    }).withFailureHandler(function(e){showLoading(false);showToast(e.message,'danger');}).processPayroll({period:period});
+  }
+
+  function _payrollPreviewCard(prev, period, processed) {
+    var sym=_config.currencySymbol||'GH₵';
+    var t=prev.totals||{};
+    var rows=(prev.lines||[]).map(function(l){
+      return '<tr><td>'+_esc(l.employee_name)+'</td><td class="text-end">'+_fmtMoney(l.gross_pay,sym)+'</td>' +
+        '<td class="text-end">'+_fmtMoney(l.pension_employee,sym)+'</td><td class="text-end">'+_fmtMoney(l.paye_tax,sym)+'</td>' +
+        '<td class="text-end fw-bold">'+_fmtMoney(l.net_pay,sym)+'</td></tr>';
+    }).join('');
+    return '<div class="card mb-3 border-primary"><div class="card-header bg-primary text-white">Preview — '+period+' ('+prev.employeeCount+' employees)</div>' +
+      '<div class="table-container"><table class="table table-sm mb-0"><thead><tr><th>Employee</th><th class="text-end">Gross</th><th class="text-end">SSNIT</th><th class="text-end">PAYE</th><th class="text-end">Net</th></tr></thead><tbody>' +
+      rows +
+      '</tbody><tfoot><tr class="fw-bold table-light"><td>Totals</td><td class="text-end">'+_fmtMoney(t.gross_pay,sym)+'</td>' +
+      '<td class="text-end">'+_fmtMoney(t.pension_employee,sym)+'</td><td class="text-end">'+_fmtMoney(t.paye_tax,sym)+'</td>' +
+      '<td class="text-end">'+_fmtMoney(t.net_pay,sym)+'</td></tr></tfoot></table></div>' +
+      '<div class="card-footer small text-muted">Employer SSNIT: '+_fmtMoney(t.pension_employer,sym)+' &middot; Total employer cost: '+_fmtMoney(t.employer_cost,sym)+'</div></div>';
+  }
+
+  function _renderPayrollRunDetail(c, id) {
+    _loading(c);
+    _callModule('payroll','get',{id:id},function(run){
+      var sym=_config.currencySymbol||'GH₵';
+      var payBtn=run.status==='Processed'?'<button class="btn btn-success" onclick="App.payNetSalaries(\''+id+'\')"><i class="bi bi-bank me-1"></i>Pay Net Salaries</button>':'';
+      var html='<a href="javascript:void(0)" class="text-decoration-none mb-3 d-inline-block" onclick="App.navigate(\'payroll-runs\')"><i class="bi bi-arrow-left me-1"></i>Back to Payroll Runs</a>' +
+        '<div class="detail-header"><div><h4>Payroll '+_esc(run.period)+'</h4><p class="text-muted mb-0">'+(run.employee_count||0)+' employees &middot; '+_badge(run.status)+' &middot; Journal: '+_esc(run.journal_ref||'—')+'</p></div>' +
+        '<div class="action-btn-group">'+payBtn+'</div></div>' +
+        '<div class="detail-meta mb-4">' +
+        '<div class="meta-item"><div class="meta-label">Gross</div><div class="meta-value">'+_fmtMoney(run.total_gross,sym)+'</div></div>' +
+        '<div class="meta-item"><div class="meta-label">PAYE</div><div class="meta-value">'+_fmtMoney(run.total_paye,sym)+'</div></div>' +
+        '<div class="meta-item"><div class="meta-label">SSNIT (EE+ER)</div><div class="meta-value">'+_fmtMoney((parseFloat(run.total_pension_employee)||0)+(parseFloat(run.total_pension_employer)||0),sym)+'</div></div>' +
+        '<div class="meta-item"><div class="meta-label">Net</div><div class="meta-value">'+_fmtMoney(run.total_net,sym)+'</div></div>' +
+        '<div class="meta-item"><div class="meta-label">Employer Cost</div><div class="meta-value">'+_fmtMoney(run.total_employer_cost,sym)+'</div></div>' +
+        '</div>' +
+        '<div class="card"><div class="card-header">Payslips</div><div class="table-container"><table class="table"><thead><tr>' +
+        '<th>Employee</th><th class="text-end">Basic</th><th class="text-end">Allow.</th><th class="text-end">Gross</th><th class="text-end">SSNIT</th><th class="text-end">PAYE</th><th class="text-end">Net</th></tr></thead><tbody>';
+      (run.details||[]).forEach(function(p){
+        html+='<tr><td>'+_esc(p.employee_name)+'</td><td class="text-end">'+_fmtMoney(p.basic_salary)+'</td>' +
+          '<td class="text-end">'+_fmtMoney(p.allowances)+'</td><td class="text-end">'+_fmtMoney(p.gross_pay)+'</td>' +
+          '<td class="text-end">'+_fmtMoney(p.pension_employee)+'</td><td class="text-end">'+_fmtMoney(p.paye_tax)+'</td>' +
+          '<td class="text-end fw-bold">'+_fmtMoney(p.net_pay)+'</td></tr>';
+      });
+      if(!(run.details||[]).length) html+='<tr><td colspan="7" class="text-center text-muted py-3">No payslips</td></tr>';
+      html+='</tbody></table></div></div>';
+      c.innerHTML=html;
+    });
+  }
+
+  function payNetSalaries(payrollId) {
+    var html='<div class="modal fade" id="crudModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">' +
+      '<div class="modal-header"><h5><i class="bi bi-bank me-2"></i>Pay Net Salaries</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>' +
+      '<div class="modal-body"><div class="alert alert-info mb-3"><i class="bi bi-info-circle me-2"></i>Posts a journal clearing Net Salary Payable to the selected account.</div>' +
+      '<label class="form-label">Pay from</label><select class="form-select" id="payMethod"><option>Bank Transfer</option><option>Cash</option></select></div>' +
+      '<div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>' +
+      '<button class="btn btn-success" onclick="App._doPayNet(\''+payrollId+'\')"><i class="bi bi-check-lg me-1"></i>Confirm Payment</button></div></div></div></div>';
+    _showModal(html);
+  }
+
+  function _doPayNet(payrollId) {
+    var method=document.getElementById('payMethod').value;
+    _hideModal();showLoading(true);
+    google.script.run.withSuccessHandler(function(r){
+      showLoading(false);showToast('Salaries paid. Journal: '+(r.journalRef||'—'),'success');
+      navigate('payroll-runs',{view:payrollId});
+    }).withFailureHandler(function(e){showLoading(false);showToast(e.message,'danger');}).payNetSalaries({payroll_id:payrollId,payment_method:method});
+  }
+
+  // ============================================================
+  // REPORTS
+  // ============================================================
+  function _renderReports(c, params) {
+    _loading(c);
+    google.script.run.withSuccessHandler(function(res){
+      var reports=_data(res);
+      var groups={};
+      reports.forEach(function(r){ (groups[r.group]=groups[r.group]||[]).push(r); });
+      var today=new Date().toISOString().split('T')[0];
+      var yearStart=new Date(new Date().getFullYear(),0,1).toISOString().split('T')[0];
+      var monthStr=new Date().toISOString().slice(0,7);
+      var groupHtml=Object.keys(groups).map(function(g){
+        var cards=groups[g].map(function(r){
+          return '<button class="report-card" onclick="App.runReport(\''+r.id+'\')"><i class="bi bi-file-earmark-text"></i><span>'+_esc(r.name)+'</span></button>';
+        }).join('');
+        return '<div class="report-group"><div class="report-group-title">'+_esc(g)+'</div><div class="report-card-grid">'+cards+'</div></div>';
+      }).join('');
+      c.innerHTML='<div class="card mb-3"><div class="card-body d-flex flex-wrap gap-2 align-items-end">' +
+        '<div><label class="form-label small mb-1">Period Start</label><input type="date" class="form-control form-control-sm" id="rpStart" value="'+yearStart+'"></div>' +
+        '<div><label class="form-label small mb-1">Period End / As of</label><input type="date" class="form-control form-control-sm" id="rpEnd" value="'+today+'"></div>' +
+        '<div class="text-muted small ms-2">Date filters apply to period-based reports.</div>' +
+        '</div></div>' + groupHtml +
+        '<div id="reportOutput" class="mt-3"></div>';
+      if(params&&params.report) runReport(params.report);
+    }).withFailureHandler(function(e){c.innerHTML='<div class="alert alert-danger">'+e.message+'</div>';}).listReports();
+  }
+
+  function runReport(id) {
+    var start=(document.getElementById('rpStart')||{}).value;
+    var end=(document.getElementById('rpEnd')||{}).value;
+    var out=document.getElementById('reportOutput');
+    out.innerHTML='<div class="module-loading"><div class="spinner-border text-primary"></div></div>';
+    out.scrollIntoView({behavior:'smooth',block:'start'});
+    google.script.run.withSuccessHandler(function(data){
+      out.innerHTML=_renderReportOutput(id,data,start,end);
+    }).withFailureHandler(function(e){out.innerHTML='<div class="alert alert-danger">'+e.message+'</div>';})
+      .generateReport({report:id,start:start,end:end,asOf:end});
+  }
+
+  function _renderReportOutput(id, d, start, end) {
+    var sym=_config.currencySymbol||'GH₵';
+    var hdr=function(t,sub){return '<div class="report-header"><h4>'+t+'</h4><div class="text-muted small">'+(sub||'')+'</div></div>';};
+
+    if(id==='profit_loss'){
+      var rows='';
+      rows+='<tr class="table-light"><td colspan="2"><strong>Revenue</strong></td></tr>';
+      (d.revenue||[]).forEach(function(r){rows+='<tr><td class="ps-3">'+_esc(r.name)+'</td><td class="text-end">'+_fmtMoney(r.amount,sym)+'</td></tr>';});
+      rows+='<tr class="fw-bold"><td class="ps-3">Total Revenue</td><td class="text-end">'+_fmtMoney(d.totalRevenue,sym)+'</td></tr>';
+      rows+='<tr class="table-light"><td colspan="2"><strong>Cost of Goods Sold</strong></td></tr>';
+      (d.cogs||[]).forEach(function(r){rows+='<tr><td class="ps-3">'+_esc(r.name)+'</td><td class="text-end">'+_fmtMoney(r.amount,sym)+'</td></tr>';});
+      rows+='<tr class="fw-bold"><td class="ps-3">Gross Profit</td><td class="text-end">'+_fmtMoney(d.grossProfit,sym)+'</td></tr>';
+      rows+='<tr class="table-light"><td colspan="2"><strong>Operating Expenses</strong></td></tr>';
+      (d.expenses||[]).forEach(function(r){rows+='<tr><td class="ps-3">'+_esc(r.name)+'</td><td class="text-end">'+_fmtMoney(r.amount,sym)+'</td></tr>';});
+      rows+='<tr class="fw-bold"><td class="ps-3">Total Expenses</td><td class="text-end">'+_fmtMoney(d.totalExpenses,sym)+'</td></tr>';
+      rows+='<tr class="'+(d.netProfit>=0?'table-success':'table-danger')+' fw-bold"><td>Net '+(d.netProfit>=0?'Profit':'Loss')+'</td><td class="text-end">'+_fmtMoney(d.netProfit,sym)+'</td></tr>';
+      return hdr('Profit &amp; Loss Statement',start+' to '+end+' · Gross margin '+d.grossMargin+'% · Net margin '+d.netMargin+'%') +
+        '<div class="card"><div class="table-container"><table class="table table-sm mb-0"><tbody>'+rows+'</tbody></table></div></div>';
+    }
+
+    if(id==='balance_sheet'){
+      var sec=function(title,items){var h='<tr class="table-light"><td colspan="2"><strong>'+title+'</strong></td></tr>';(items||[]).forEach(function(r){h+='<tr><td class="ps-3">'+_esc(r.name)+'</td><td class="text-end">'+_fmtMoney(r.amount,sym)+'</td></tr>';});return h;};
+      return hdr('Balance Sheet','As of '+d.asOf+' · <span class="badge '+(d.balanced?'bg-success':'bg-danger')+'">'+(d.balanced?'Balanced':'Out by '+_fmtMoney(d.difference,sym))+'</span>') +
+        '<div class="card"><div class="table-container"><table class="table table-sm mb-0"><tbody>' +
+        sec('Assets',d.assets)+'<tr class="fw-bold"><td>Total Assets</td><td class="text-end">'+_fmtMoney(d.totalAssets,sym)+'</td></tr>' +
+        sec('Liabilities',d.liabilities)+'<tr class="fw-bold"><td>Total Liabilities</td><td class="text-end">'+_fmtMoney(d.totalLiabilities,sym)+'</td></tr>' +
+        sec('Equity',d.equity)+'<tr class="fw-bold"><td>Total Equity</td><td class="text-end">'+_fmtMoney(d.totalEquity,sym)+'</td></tr>' +
+        '<tr class="table-active fw-bold"><td>Liabilities + Equity</td><td class="text-end">'+_fmtMoney(d.totalLiabilitiesAndEquity,sym)+'</td></tr>' +
+        '</tbody></table></div></div>';
+    }
+
+    if(id==='cash_flow'){
+      var blk=function(title,items,total){var h='<tr class="table-light"><td colspan="2"><strong>'+title+'</strong></td></tr>';(items||[]).forEach(function(r){h+='<tr><td class="ps-3">'+_esc(r.label)+'</td><td class="text-end '+(r.amount<0?'text-danger':'')+'">'+_fmtMoney(r.amount,sym)+'</td></tr>';});h+='<tr class="fw-bold"><td class="ps-3">Net '+title+'</td><td class="text-end">'+_fmtMoney(total,sym)+'</td></tr>';return h;};
+      return hdr('Cash Flow Statement',start+' to '+end+' · <span class="badge '+(d.reconciled?'bg-success':'bg-warning')+'">'+(d.reconciled?'Reconciled':'Diff '+_fmtMoney(d.difference,sym))+'</span>') +
+        '<div class="card"><div class="table-container"><table class="table table-sm mb-0"><tbody>' +
+        blk('Operating Activities',d.operating,d.operatingTotal) +
+        blk('Investing Activities',d.investing,d.investingTotal) +
+        blk('Financing Activities',d.financing,d.financingTotal) +
+        '<tr class="table-active fw-bold"><td>Net Change in Cash</td><td class="text-end">'+_fmtMoney(d.netChange,sym)+'</td></tr>' +
+        '<tr><td class="small text-muted">Actual cash/bank movement</td><td class="text-end small text-muted">'+_fmtMoney(d.actualCashChange,sym)+'</td></tr>' +
+        '</tbody></table></div></div>';
+    }
+
+    if(id==='trial_balance'){
+      var rows='';
+      (d.accounts||[]).forEach(function(a){rows+='<tr><td>'+_esc(a.accountCode)+'</td><td>'+_esc(a.accountName)+'</td><td class="text-end">'+(a.debit?_fmtMoney(a.debit,sym):'-')+'</td><td class="text-end">'+(a.credit?_fmtMoney(a.credit,sym):'-')+'</td></tr>';});
+      return hdr('Trial Balance','<span class="badge '+(d.balanced?'bg-success':'bg-danger')+'">'+(d.balanced?'Balanced':'Unbalanced')+'</span>') +
+        '<div class="card"><div class="table-container"><table class="table table-sm mb-0"><thead><tr><th>Code</th><th>Account</th><th class="text-end">Debit</th><th class="text-end">Credit</th></tr></thead><tbody>'+rows +
+        '</tbody><tfoot><tr class="fw-bold"><td colspan="2" class="text-end">Totals</td><td class="text-end">'+_fmtMoney(d.totalDebits,sym)+'</td><td class="text-end">'+_fmtMoney(d.totalCredits,sym)+'</td></tr></tfoot></table></div></div>';
+    }
+
+    if(id==='general_ledger'){
+      var html=hdr('General Ledger',start+' to '+end);
+      (d.accounts||[]).forEach(function(a){
+        if(!a.entries.length&&!a.opening&&!a.closing)return;
+        html+='<div class="card mb-2"><div class="card-header d-flex justify-content-between"><span><strong>'+_esc(a.code)+'</strong> '+_esc(a.name)+'</span><span class="small">Opening '+_fmtMoney(a.opening,sym)+' · Closing <strong>'+_fmtMoney(a.closing,sym)+'</strong></span></div>' +
+          '<div class="table-container"><table class="table table-sm mb-0"><tbody>';
+        a.entries.forEach(function(e){html+='<tr><td>'+_fmtDate(e.date)+'</td><td><small>'+_esc(e.description)+'</small></td><td class="text-end">'+(e.debit?_fmtMoney(e.debit,sym):'-')+'</td><td class="text-end">'+(e.credit?_fmtMoney(e.credit,sym):'-')+'</td></tr>';});
+        html+='</tbody></table></div></div>';
+      });
+      return html;
+    }
+
+    if(id==='ar_aging'||id==='ap_aging'){
+      var isAR=id==='ar_aging';
+      var t=d.totals||{};
+      var buckets=[['Current','current'],['1-30','days30'],['31-60','days60'],['61-90','days90'],['90+','over90']];
+      var head=buckets.map(function(b){return '<th class="text-end">'+b[0]+'</th>';}).join('');
+      var totalRow=buckets.map(function(b){return '<td class="text-end">'+_fmtMoney(t[b[1]],sym)+'</td>';}).join('');
+      // Detail rows
+      var allItems=[];
+      buckets.forEach(function(b){(d[b[1]]||[]).forEach(function(it){it._bucket=b[0];allItems.push(it);});});
+      var detail=allItems.map(function(it){
+        return '<tr><td>'+_esc(isAR?(it.invoice_number||it.customer_name):(it.po_number||it.supplier_name))+'</td><td>'+_esc(isAR?it.customer_name:it.supplier_name)+'</td>' +
+          '<td>'+_fmtDate(it.due_date||it.date)+'</td><td>'+(it.days_overdue||0)+'d</td><td class="text-end">'+_fmtMoney(it.balance_due,sym)+'</td></tr>';
+      }).join('');
+      return hdr((isAR?'Accounts Receivable':'Accounts Payable')+' Aging','Total outstanding '+_fmtMoney(t.total,sym)) +
+        '<div class="card mb-3"><div class="table-container"><table class="table table-sm mb-0"><thead><tr>'+head+'<th class="text-end">Total</th></tr></thead>' +
+        '<tbody><tr class="fw-bold">'+totalRow+'<td class="text-end">'+_fmtMoney(t.total,sym)+'</td></tr></tbody></table></div></div>' +
+        '<div class="card"><div class="card-header">Detail</div><div class="table-container"><table class="table table-sm mb-0"><thead><tr><th>Ref</th><th>'+(isAR?'Customer':'Supplier')+'</th><th>Due</th><th>Overdue</th><th class="text-end">Balance</th></tr></thead><tbody>'+(detail||'<tr><td colspan="5" class="text-center text-muted py-2">Nothing outstanding</td></tr>')+'</tbody></table></div></div>';
+    }
+
+    if(id==='inventory_valuation'){
+      var rows='';
+      (d.items||[]).forEach(function(it){rows+='<tr><td><code>'+_esc(it.sku)+'</code></td><td>'+_esc(it.name)+'</td><td>'+_esc(it.category||'—')+'</td><td class="text-end">'+it.quantity+'</td><td class="text-end">'+_fmtMoney(it.cost_price,sym)+'</td><td class="text-end fw-bold">'+_fmtMoney(it.total_value,sym)+'</td></tr>';});
+      return hdr('Inventory Valuation','Total value '+_fmtMoney(d.totalValue,sym)+' · '+d.totalItems+' products') +
+        '<div class="card"><div class="table-container"><table class="table table-sm mb-0"><thead><tr><th>SKU</th><th>Name</th><th>Category</th><th class="text-end">Qty</th><th class="text-end">Cost</th><th class="text-end">Value</th></tr></thead><tbody>'+rows +
+        '</tbody><tfoot><tr class="fw-bold"><td colspan="5" class="text-end">Total</td><td class="text-end">'+_fmtMoney(d.totalValue,sym)+'</td></tr></tfoot></table></div></div>';
+    }
+
+    if(id==='inventory_lowstock'){
+      var out=(d.outOfStock||[]).map(function(p){return '<tr class="table-danger"><td>'+_esc(p.name)+'</td><td><code>'+_esc(p.sku)+'</code></td><td class="text-end">0</td><td class="text-end">'+p.reorder_level+'</td></tr>';}).join('');
+      var low=(d.lowStock||[]).map(function(p){return '<tr class="table-warning"><td>'+_esc(p.name)+'</td><td><code>'+_esc(p.sku)+'</code></td><td class="text-end">'+p.quantity+'</td><td class="text-end">'+p.reorder_level+'</td></tr>';}).join('');
+      return hdr('Low Stock Report',d.totalOut+' out of stock · '+d.totalLow+' low') +
+        '<div class="card"><div class="table-container"><table class="table table-sm mb-0"><thead><tr><th>Product</th><th>SKU</th><th class="text-end">Qty</th><th class="text-end">Reorder At</th></tr></thead><tbody>'+(out+low||'<tr><td colspan="4" class="text-center text-muted py-2">All items in stock</td></tr>')+'</tbody></table></div></div>';
+    }
+
+    if(id==='payroll_summary'){
+      var t=d.totals||{};
+      var rows=(d.rows||[]).map(function(r){return '<tr><td><strong>'+_esc(r.period)+'</strong></td><td>'+_badge(r.status)+'</td><td class="text-end">'+r.employees+'</td><td class="text-end">'+_fmtMoney(r.gross,sym)+'</td><td class="text-end">'+_fmtMoney(r.paye,sym)+'</td><td class="text-end">'+_fmtMoney(r.pension,sym)+'</td><td class="text-end fw-bold">'+_fmtMoney(r.net,sym)+'</td></tr>';}).join('');
+      return hdr('Payroll Summary',start+' to '+end+' · '+t.runCount+' runs') +
+        '<div class="card"><div class="table-container"><table class="table table-sm mb-0"><thead><tr><th>Period</th><th>Status</th><th class="text-end">Emp.</th><th class="text-end">Gross</th><th class="text-end">PAYE</th><th class="text-end">SSNIT</th><th class="text-end">Net</th></tr></thead><tbody>'+(rows||'<tr><td colspan="7" class="text-center text-muted py-2">No runs in range</td></tr>') +
+        '</tbody><tfoot><tr class="fw-bold"><td colspan="3" class="text-end">Totals</td><td class="text-end">'+_fmtMoney(t.gross,sym)+'</td><td class="text-end">'+_fmtMoney(t.paye,sym)+'</td><td class="text-end">'+_fmtMoney(Utils_toFloat(t.pensionEmployee)+Utils_toFloat(t.pensionEmployer),sym)+'</td><td class="text-end">'+_fmtMoney(t.net,sym)+'</td></tr></tfoot></table></div></div>';
+    }
+
+    if(id==='payroll_statutory'){
+      var t=d.totals||{};
+      var rows=(d.rows||[]).map(function(r){return '<tr><td><strong>'+_esc(r.period)+'</strong></td><td class="text-end">'+_fmtMoney(r.paye,sym)+'</td><td class="text-end">'+_fmtMoney(r.ssnit_employee,sym)+'</td><td class="text-end">'+_fmtMoney(r.ssnit_employer,sym)+'</td><td class="text-end">'+_fmtMoney(r.ssnit_total,sym)+'</td><td class="text-end fw-bold">'+_fmtMoney(r.total_statutory,sym)+'</td></tr>';}).join('');
+      return hdr('Statutory Remittance',start+' to '+end+' · PAYE to GRA, SSNIT to pension fund') +
+        '<div class="card"><div class="table-container"><table class="table table-sm mb-0"><thead><tr><th>Period</th><th class="text-end">PAYE</th><th class="text-end">SSNIT Emp.</th><th class="text-end">SSNIT Empr.</th><th class="text-end">SSNIT Total</th><th class="text-end">Total</th></tr></thead><tbody>'+(rows||'<tr><td colspan="6" class="text-center text-muted py-2">No runs in range</td></tr>') +
+        '</tbody><tfoot><tr class="fw-bold"><td class="text-end">Totals</td><td class="text-end">'+_fmtMoney(t.paye,sym)+'</td><td class="text-end">'+_fmtMoney(t.ssnit_employee,sym)+'</td><td class="text-end">'+_fmtMoney(t.ssnit_employer,sym)+'</td><td class="text-end">'+_fmtMoney(t.ssnit_total,sym)+'</td><td class="text-end">'+_fmtMoney(t.total_statutory,sym)+'</td></tr></tfoot></table></div></div>';
+    }
+
+    if(id==='payroll_by_dept'){
+      var t=d.totals||{};
+      var rows=(d.rows||[]).map(function(r){return '<tr><td>'+_esc(r.department)+'</td><td class="text-end">'+r.employees+'</td><td class="text-end">'+_fmtMoney(r.gross,sym)+'</td><td class="text-end">'+_fmtMoney(r.paye,sym)+'</td><td class="text-end fw-bold">'+_fmtMoney(r.net,sym)+'</td></tr>';}).join('');
+      return hdr('Payroll Cost by Department',start+' to '+end) +
+        '<div class="card"><div class="table-container"><table class="table table-sm mb-0"><thead><tr><th>Department</th><th class="text-end">Emp.</th><th class="text-end">Gross</th><th class="text-end">PAYE</th><th class="text-end">Net</th></tr></thead><tbody>'+(rows||'<tr><td colspan="5" class="text-center text-muted py-2">No data in range</td></tr>') +
+        '</tbody><tfoot><tr class="fw-bold"><td class="text-end">Total</td><td class="text-end">'+t.employees+'</td><td class="text-end">'+_fmtMoney(t.gross,sym)+'</td><td class="text-end">'+_fmtMoney(t.paye,sym)+'</td><td class="text-end">'+_fmtMoney(t.net,sym)+'</td></tr></tfoot></table></div></div>';
+    }
+
+    if(id==='financial_ratios'){
+      return _ratiosTable(d,sym);
+    }
+
+    return '<div class="alert alert-info">Report generated.</div>';
+  }
+
+  function _ratiosTable(d, sym) {
+    var fmt=function(v,suffix){return v===null||v===undefined?'<span class="text-muted">n/a</span>':v+(suffix||'');};
+    var row=function(label,val,hint){return '<tr><td>'+label+'</td><td class="text-end fw-bold">'+val+'</td><td class="small text-muted">'+(hint||'')+'</td></tr>';};
+    var l=d.liquidity||{},p=d.profitability||{},e=d.efficiency||{},cf=d.cashFlow||{};
+    return '<div class="report-header"><h4>Financial Ratios</h4><div class="text-muted small">As of '+d.asOf+'</div></div>' +
+      '<div class="row g-3">' +
+      '<div class="col-md-6"><div class="card"><div class="card-header">Liquidity</div><div class="table-container"><table class="table table-sm mb-0"><tbody>' +
+        row('Current Ratio',fmt(l.currentRatio),'Current assets / current liabilities') +
+        row('Quick Ratio',fmt(l.quickRatio),'(Current assets − inventory) / current liabilities') +
+        '</tbody></table></div></div></div>' +
+      '<div class="col-md-6"><div class="card"><div class="card-header">Profitability</div><div class="table-container"><table class="table table-sm mb-0"><tbody>' +
+        row('Gross Margin',fmt(p.grossMargin,'%'),'Gross profit / revenue') +
+        row('Net Margin',fmt(p.netMargin,'%'),'Net profit / revenue') +
+        row('Return on Assets',fmt(p.returnOnAssets,'%'),'Net profit / total assets') +
+        '</tbody></table></div></div></div>' +
+      '<div class="col-md-6"><div class="card"><div class="card-header">Efficiency</div><div class="table-container"><table class="table table-sm mb-0"><tbody>' +
+        row('Inventory Turnover',fmt(e.inventoryTurnover,'x'),'COGS / inventory') +
+        row('Receivable Days',fmt(e.receivableDays),'Days sales outstanding') +
+        row('Payable Days',fmt(e.payableDays),'Days payable outstanding') +
+        row('Asset Turnover',fmt(e.assetTurnover,'x'),'Revenue / total assets') +
+        '</tbody></table></div></div></div>' +
+      '<div class="col-md-6"><div class="card"><div class="card-header">Cash Flow</div><div class="table-container"><table class="table table-sm mb-0"><tbody>' +
+        row('Operating Cash Flow',_fmtMoney(cf.operatingCashFlow,sym),'From cash flow statement') +
+        row('Free Cash Flow',_fmtMoney(cf.freeCashFlow,sym),'Operating − capex') +
+        row('Burn Rate',_fmtMoney(cf.burnRate,sym),'Monthly cash consumption') +
+        row('Cash Runway',fmt(cf.cashRunwayMonths,' mo'),'Cash / burn rate') +
+        '</tbody></table></div></div></div>' +
+      '</div>';
+  }
+
+  // ============================================================
+  // ANALYTICS DASHBOARD
+  // ============================================================
+  function _renderAnalytics(c) {
+    var today=new Date().toISOString().split('T')[0];
+    var yearStart=new Date(new Date().getFullYear(),0,1).toISOString().split('T')[0];
+    c.innerHTML='<div class="card mb-3"><div class="card-body d-flex flex-wrap gap-2 align-items-end">' +
+      '<div><label class="form-label small mb-1">From</label><input type="date" class="form-control form-control-sm" id="anStart" value="'+yearStart+'"></div>' +
+      '<div><label class="form-label small mb-1">To</label><input type="date" class="form-control form-control-sm" id="anEnd" value="'+today+'"></div>' +
+      '<button class="btn btn-sm btn-primary" onclick="App.loadAnalytics()"><i class="bi bi-arrow-repeat me-1"></i>Refresh</button>' +
+      '</div></div><div id="analyticsBody"><div class="module-loading"><div class="spinner-border text-primary"></div></div></div>';
+    loadAnalytics();
+  }
+
+  function loadAnalytics() {
+    var start=document.getElementById('anStart').value;
+    var end=document.getElementById('anEnd').value;
+    var body=document.getElementById('analyticsBody');
+    body.innerHTML='<div class="module-loading"><div class="spinner-border text-primary"></div></div>';
+    google.script.run.withSuccessHandler(function(d){
+      var sym=_config.currencySymbol||'GH₵';
+      var l=d.liquidity||{},p=d.profitability||{},e=d.efficiency||{},cf=d.cashFlow||{};
+      var gauge=function(label,val,suffix,col){return '<div class="col-6 col-md-3"><div class="kpi-card '+col+'"><div class="kpi-label">'+label+'</div><div class="kpi-value">'+(val===null||val===undefined?'n/a':val+(suffix||''))+'</div></div></div>';};
+      body.innerHTML='<div class="row g-3 mb-3">' +
+        gauge('Current Ratio',l.currentRatio,'x','info') +
+        gauge('Net Margin',p.netMargin,'%','success') +
+        gauge('Return on Assets',p.returnOnAssets,'%','warning') +
+        gauge('Cash Runway',cf.cashRunwayMonths,' mo','primary') +
+        '</div>' +
+        '<div class="row g-3 mb-3">' +
+        '<div class="col-lg-6"><div class="card"><div class="card-header">Profitability Margins</div><div class="card-body"><div class="chart-container" style="height:240px;"><canvas id="anMargins"></canvas></div></div></div></div>' +
+        '<div class="col-lg-6"><div class="card"><div class="card-header">Efficiency (days)</div><div class="card-body"><div class="chart-container" style="height:240px;"><canvas id="anEfficiency"></canvas></div></div></div></div>' +
+        '</div>' +
+        '<div id="ratiosDetail"></div>';
+      document.getElementById('ratiosDetail').innerHTML=_ratiosTable(d,sym);
+
+      _destroyChart('anMargins');
+      var ctx=document.getElementById('anMargins');
+      if(ctx)_charts.anMargins=new Chart(ctx,{type:'bar',data:{labels:['Gross','Net','ROA'],datasets:[{label:'%',data:[p.grossMargin||0,p.netMargin||0,p.returnOnAssets||0],backgroundColor:['#1a73e8','#34a853','#fbbc04']}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}}}});
+      _destroyChart('anEfficiency');
+      var ctx2=document.getElementById('anEfficiency');
+      if(ctx2)_charts.anEfficiency=new Chart(ctx2,{type:'bar',data:{labels:['Receivable Days','Payable Days'],datasets:[{label:'Days',data:[e.receivableDays||0,e.payableDays||0],backgroundColor:['#ea4335','#8e24aa']}]},options:{responsive:true,maintainAspectRatio:false,indexAxis:'y',plugins:{legend:{display:false}}}});
+    }).withFailureHandler(function(e){body.innerHTML='<div class="alert alert-danger">'+e.message+'</div>';}).getFinancialRatios({start:start,end:end});
+  }
+
+  function _renderPlaceholder(c,mod) {
+    c.innerHTML='<div class="text-center py-5"><div style="font-size:4rem;color:var(--text-muted);margin-bottom:1rem;"><i class="bi bi-tools"></i></div>' +
+      '<h3 class="text-muted">'+(MODULE_TITLES[mod]||mod)+'</h3><p class="text-muted mb-4">Coming in a future phase.</p>' +
+      '<button class="btn btn-primary" onclick="App.navigate(\'dashboard\')"><i class="bi bi-arrow-left me-1"></i>Dashboard</button></div>';
+  }
+
+  // Utility to parse floats safely client-side
+  function Utils_toFloat(v){return parseFloat(v)||0;}
+
+  // ============================================================
+  // PUBLIC API
+  // ============================================================
+  return {
+    init:init, navigate:navigate, toggleSidebar:toggleSidebar, changePeriod:changePeriod,
+    initDatabase:initDatabase, _runInitDatabase:_runInitDatabase, showDatabaseInfo:showDatabaseInfo, _setSpreadsheet:_setSpreadsheet, _clearCaches:_clearCaches, _runSelfTest:_runSelfTest, saveSettings:saveSettings, showLoading:showLoading, showToast:showToast,
+    // Customers
+    showCustomerModal:showCustomerModal, saveCustomer:saveCustomer,
+    // Invoices
+    showInvoiceModal:showInvoiceModal, addLineItem:addLineItem, onProductSelect:onProductSelect,
+    calcLineTotal:calcLineTotal, saveInvoice:saveInvoice,
+    sendInvoice:sendInvoice, cancelInvoice:cancelInvoice, pdfInvoice:pdfInvoice, emailInvoice:emailInvoice,
+    // Receipts
+    showReceiptModal:showReceiptModal, loadCustomerInvoices:loadCustomerInvoices, saveReceipt:saveReceipt,
+    // Quotations
+    showQuotationModal:showQuotationModal, saveQuotation:saveQuotation, convertQuotation:convertQuotation,
+    // Accounting
+    _loadAccTab:_loadAccTab,
+    loadLedger:loadLedger, loadStatements:loadStatements,
+    validateBooks:validateBooks,
+    showJournalModal:showJournalModal, _addJournalLine:_addJournalLine,
+    _recalcJournal:_recalcJournal, saveJournal:saveJournal,
+    showAccountModal:showAccountModal, saveAccount:saveAccount,
+    doClosePeriod:doClosePeriod, _doCloseConfirmed:_doCloseConfirmed,
+    doReopenPeriod:doReopenPeriod, _doReopenConfirmed:_doReopenConfirmed,
+    showEmployeeModal:showEmployeeModal, saveEmployee:saveEmployee, _applyStructure:_applyStructure,
+    previewEmployeePayslip:previewEmployeePayslip,
+    showStructureModal:showStructureModal, saveStructure:saveStructure,
+    previewPayrollRun:previewPayrollRun, processPayrollRun:processPayrollRun,
+    _doProcessPayroll:_doProcessPayroll, payNetSalaries:payNetSalaries, _doPayNet:_doPayNet,
+    runReport:runReport, loadAnalytics:loadAnalytics,
+    // Inventory
+    showProductModal:showProductModal, saveProduct:saveProduct,
+    showAdjustModal:showAdjustModal, saveAdjust:saveAdjust,
+    showDamageModal:showDamageModal, saveDamage:saveDamage,
+    showTransferModal:showTransferModal, saveTransfer:saveTransfer,
+    showCategoryModal:showCategoryModal, saveCategory:saveCategory,
+    showSupplierModal:showSupplierModal, saveSupplier:saveSupplier,
+    _filterTxnType:_filterTxnType,
+    // Internal
+    _filterTable:_filterTable,
+    getUser:function(){return _user;}, getConfig:function(){return _config;}
+  };
+
+})();
+</script>

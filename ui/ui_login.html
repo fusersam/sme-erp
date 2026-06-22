@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SME Business Manager - Login</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+  <style>
+    :root { --brand-primary: #1a73e8; --brand-dark: #1557b0; }
+    body {
+      background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+      min-height: 100vh;
+      display: flex; align-items: center; justify-content: center;
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    }
+    .login-card {
+      background: #fff;
+      border-radius: 16px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.1);
+      padding: 3rem 2.5rem;
+      max-width: 460px; width: 100%; text-align: center;
+    }
+    .login-logo {
+      width: 72px; height: 72px;
+      background: var(--brand-primary);
+      border-radius: 18px;
+      display: flex; align-items: center; justify-content: center;
+      margin: 0 auto 1.5rem;
+    }
+    .login-logo i { font-size: 2rem; color: #fff; }
+    .login-card h1 { font-size: 1.5rem; font-weight: 700; color: #1a1a2e; margin-bottom: 0.5rem; }
+    .login-card p.subtitle { color: #6c757d; font-size: 0.95rem; margin-bottom: 2rem; }
+    .btn-google {
+      background: var(--brand-primary); color: #fff;
+      border: none; padding: 0.75rem 2rem;
+      border-radius: 10px; font-size: 1rem; font-weight: 600;
+      width: 100%; transition: all 0.2s;
+    }
+    .btn-google:hover { background: var(--brand-dark); color: #fff; transform: translateY(-1px); }
+    .btn-google:disabled { opacity: 0.7; cursor: not-allowed; transform: none; }
+    .status-msg { margin-top: 1.25rem; font-size: 0.9rem; }
+    .features-list { text-align: left; margin: 1.5rem 0; }
+    .features-list li { padding: 0.3rem 0; color: #495057; font-size: 0.9rem; }
+    .features-list i { color: var(--brand-primary); margin-right: 0.5rem; }
+    .detected-email-box {
+      background: #f8f9fa; border: 1px solid #e0e0e0;
+      border-radius: 8px; padding: 0.6rem 1rem;
+      margin: 1rem 0; font-size: 0.82rem; color: #495057;
+      text-align: left;
+    }
+    .detected-email-box strong { color: #1a73e8; }
+    .debug-toggle { font-size: 0.75rem; color: #adb5bd; cursor: pointer; text-decoration: underline; }
+    .debug-box { background: #f1f3f4; border-radius: 8px; padding: 0.75rem; margin-top: 0.5rem; font-size: 0.75rem; text-align: left; color: #555; display: none; }
+  </style>
+</head>
+<body>
+  <div class="login-card">
+    <div class="login-logo"><i class="bi bi-building"></i></div>
+    <h1>SME Business Manager</h1>
+    <p class="subtitle">Complete business management for small &amp; medium enterprises</p>
+
+    <ul class="features-list list-unstyled">
+      <li><i class="bi bi-check-circle-fill"></i>Invoicing &amp; Receipts</li>
+      <li><i class="bi bi-check-circle-fill"></i>Inventory Management</li>
+      <li><i class="bi bi-check-circle-fill"></i>Double-Entry Accounting</li>
+      <li><i class="bi bi-check-circle-fill"></i>Payroll Processing</li>
+      <li><i class="bi bi-check-circle-fill"></i>Financial Reports &amp; Dashboards</li>
+    </ul>
+
+    <button class="btn btn-google" id="loginBtn" onclick="handleLogin()">
+      <i class="bi bi-google me-2"></i>Sign in with Google
+    </button>
+
+    <div id="statusMsg" class="status-msg"></div>
+
+    <p class="mt-4 mb-0" style="font-size:0.8rem; color:#adb5bd;">
+      Access is managed by your system administrator.<br>
+      Your Google account is used for authentication.
+    </p>
+  </div>
+
+  <script>
+    // ── Server-side detected session email (injected by doGet template) ──────
+    // This is the email the server saw when it rendered this page.
+    // It is echoed back to getUserInfo() as a fallback for deployments where
+    // Session.getActiveUser() returns '' inside google.script.run calls.
+    var _serverEmail = <?!= sessionEmail ?> || '';
+
+    function handleLogin() {
+      var btn    = document.getElementById('loginBtn');
+      var msgEl  = document.getElementById('statusMsg');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status"></span>Checking access...';
+      msgEl.innerHTML = '';
+
+      google.script.run
+        .withSuccessHandler(function(status) {
+          btn.disabled = false;
+          btn.innerHTML = '<i class="bi bi-google me-2"></i>Sign in with Google';
+
+          if (status && status.isRegistered) {
+            // Success — registered user found
+            msgEl.innerHTML =
+              '<span class="text-success"><i class="bi bi-check-circle me-1"></i>' +
+              'Welcome, <strong>' + _esc(status.userName) + '</strong>! Loading&hellip;</span>';
+            setTimeout(function() { window.top.location.reload(); }, 1000);
+
+          } else if (status && status.detectedEmail) {
+            // Google account detected but not registered
+            msgEl.innerHTML =
+              '<div class="alert alert-danger mt-2 text-start" style="font-size:0.85rem;">' +
+              '<i class="bi bi-x-circle me-1"></i><strong>Account not registered.</strong><br>' +
+              'Your Google account <strong>' + _esc(status.detectedEmail) + '</strong> ' +
+              'is not in the authorised users list.<br>' +
+              '<span class="text-muted">Contact your administrator and ask them to add you in the Users sheet, ' +
+              'or run <em>Initialize Database</em> if you are the system owner.</span>' +
+              '</div>' +
+              _debugBlock(status);
+
+          } else {
+            // Cannot detect Google identity at all
+            msgEl.innerHTML =
+              '<div class="alert alert-warning mt-2 text-start" style="font-size:0.85rem;">' +
+              '<i class="bi bi-exclamation-triangle me-1"></i><strong>Google account not detected.</strong><br>' +
+              'The server could not identify your Google account. This usually means the web app ' +
+              'is deployed with <em>\"Anyone, even anonymous\"</em> access.<br>' +
+              '<strong>Fix:</strong> Re-deploy the web app and set access to <em>\"Anyone with a Google Account\"</em>.' +
+              '</div>' +
+              _debugBlock(status);
+          }
+        })
+        .withFailureHandler(function(err) {
+          btn.disabled = false;
+          btn.innerHTML = '<i class="bi bi-google me-2"></i>Sign in with Google';
+          msgEl.innerHTML =
+            '<div class="alert alert-danger mt-2" style="font-size:0.85rem;">' +
+            '<i class="bi bi-x-circle me-1"></i>Server error: ' + _esc(err.message) + '</div>';
+        })
+        .getLoginStatus(_serverEmail);
+    }
+
+    function _debugBlock(status) {
+      if (!status) return '';
+      var detail =
+        'Server-detected email: "' + (status.detectedEmail || '—') + '"\n' +
+        'Server hint email: "' + _serverEmail + '"\n' +
+        'Active user email: "' + (status.activeEmail || '—') + '"';
+      return '<div class="text-center mt-1"><span class="debug-toggle" onclick="toggleDebug(this)">Show diagnostic info</span>' +
+        '<div class="debug-box"><pre style="margin:0;font-size:0.72rem;">' + _esc(detail) + '</pre></div></div>';
+    }
+
+    function toggleDebug(el) {
+      var box = el.nextElementSibling;
+      box.style.display = box.style.display === 'none' ? 'block' : 'none';
+      el.textContent = box.style.display === 'none' ? 'Show diagnostic info' : 'Hide diagnostic info';
+    }
+
+    function _esc(s) {
+      return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    // Auto-attempt login on page load if the server already knows the email
+    window.addEventListener('load', function() {
+      if (_serverEmail) {
+        handleLogin();
+      }
+    });
+  </script>
+</body>
+</html>
